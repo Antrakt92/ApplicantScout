@@ -1,0 +1,13 @@
+## Interface: 120005
+## Title: |cff00ff7fApplicantScout|r
+## Notes: M+ key host helper - encodes applicant data as a QR code on screen and triggers Screenshot() so the companion (external Python tool) can decode it via pyzbar and show WCL N/H/M/M+ percentiles.
+## Author: Antrakt
+## Version: 0.1.0-dev
+## SavedVariables: ApplicantScoutDB
+## DefaultState: enabled
+## X-Category: Group Finder
+## X-License: MIT
+## X-Website: https://github.com/Antrakt92/ApplicantScout
+
+libs\qrencode.lua
+ApplicantScout.lua

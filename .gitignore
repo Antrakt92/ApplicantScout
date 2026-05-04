@@ -1,0 +1,28 @@
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# WoW runtime artefacts (SavedVariables live outside the addon folder, but
+# guard against accidental commits if anyone copies them in for debugging)
+*.bak
+*.lua.bak
+SavedVariables/
+
+# Dev-internal docs — must NOT leak into the public repo. AUDIT lives in
+# WOW/applicant-scout-companion/ as the unified addon+companion backlog;
+# any local notes / planning sketches stay private.
+AUDIT.md
+PLAN.md
+NOTES.md
+TODO.md
+*.private.md
+*.private/
+CLAUDE.md
