@@ -404,7 +404,10 @@ local INTERACTION_EVENT_DESIRED = {
     MAIL_SHOW              = true,  MAIL_CLOSED            = false,
     BANKFRAME_OPENED       = true,  BANKFRAME_CLOSED       = false,
     GUILDBANKFRAME_OPENED  = true,  GUILDBANKFRAME_CLOSED  = false,
-    VOID_STORAGE_OPEN      = true,  VOID_STORAGE_CLOSE     = false,
+    -- VOID_STORAGE_* removed in Midnight 12.x — `Frame:RegisterEvent` warns
+    -- "Attempt to register unknown event" 3x. Void storage UI no longer fires
+    -- those events; the frame uses different mechanics. No replacement event
+    -- is needed (companion's QR fade-on-interaction list isn't user-facing).
     TAXIMAP_OPENED         = true,  TAXIMAP_CLOSED         = false,
     BARBER_SHOP_OPEN       = true,  BARBER_SHOP_CLOSE      = false,
     TRADE_SHOW             = true,  TRADE_CLOSED           = false,
@@ -425,7 +428,6 @@ local INTERACTION_EVENT_KIND = {
     MAIL_SHOW              = "mail",         MAIL_CLOSED            = "mail",
     BANKFRAME_OPENED       = "bank",         BANKFRAME_CLOSED       = "bank",
     GUILDBANKFRAME_OPENED  = "guildbank",    GUILDBANKFRAME_CLOSED  = "guildbank",
-    VOID_STORAGE_OPEN      = "voidstorage",  VOID_STORAGE_CLOSE     = "voidstorage",
     TAXIMAP_OPENED         = "taxi",         TAXIMAP_CLOSED         = "taxi",
     BARBER_SHOP_OPEN       = "barber",       BARBER_SHOP_CLOSE      = "barber",
     TRADE_SHOW             = "trade",        TRADE_CLOSED           = "trade",
@@ -1043,6 +1045,19 @@ end
 -- Hex-encodes payload first (see _HexEncode above for rationale). Returns
 -- matrix or nil on encoding failure (payload too large for max QR Version 40,
 -- or library bug).
+-- WHY pcall: qrencode.lua's get_version_eclevel uses assert() (real Lua error)
+-- on capacity overflow at line 214, NOT the documented (false, errmsg) tuple
+-- return. Plain `local ok, result = _qrencode(...)` lets that error propagate
+-- through scan-tick and floods BugSack with hundreds of identical errors per
+-- minute on big payloads. pcall traps it; we then fall back to lower EC
+-- (M=2 → L=1, ~26% more capacity at Version 40) for one more attempt.
+local function _TryQrEncode(hex, ec_level)
+    local pcall_ok, ok, result = pcall(_qrencode, hex, ec_level)
+    if not pcall_ok then return nil, tostring(ok) end          -- assert blew up
+    if not ok then return nil, tostring(result) end            -- documented failure
+    return result, nil
+end
+
 local function BuildQRMatrix(payload)
     if not _qrencode then
         if APSPrint then
@@ -1051,15 +1066,37 @@ local function BuildQRMatrix(payload)
         return nil
     end
     local hex = _HexEncode(payload)
-    -- ec_level 2 = M (medium, ~15% recovery). Plenty for JPG quantization noise.
-    local ok, result = _qrencode(hex, QR_EC_LEVEL)
-    if not ok then
-        if APSPrint then
-            APSPrint("QR encode failed: " .. tostring(result))
+
+    -- Preferred level (M, ~15% ECC recovery — plenty for JPG quantization noise).
+    local matrix, err = _TryQrEncode(hex, QR_EC_LEVEL)
+    if matrix then return matrix end
+
+    -- Capacity-overflow fallback: drop to EC=L (1) for max alphanumeric capacity
+    -- at Version 40 (4296 chars vs 3391 at M). Only attempt if we weren't
+    -- already at L. Companion still decodes — pyzbar reads any EC level.
+    if QR_EC_LEVEL ~= 1 then
+        local fallback_matrix, fallback_err = _TryQrEncode(hex, 1)
+        if fallback_matrix then
+            if APSPrint and ApplicantScoutDB and ApplicantScoutDB.debug then
+                APSPrint(string.format(
+                    "[APS-debug] QR overflow at EC=%d, fell back to EC=L (hex=%d chars)",
+                    QR_EC_LEVEL, #hex))
+            end
+            return fallback_matrix
         end
-        return nil
+        err = fallback_err  -- report the fallback's error if we got that far
     end
-    return result
+
+    -- Both attempts failed: payload is too big even at EC=L (>4296 alphanumeric
+    -- chars at V40). Caller (MaybeTriggerScreenshot) gets nil → skips paint +
+    -- screenshot for this snapshot. Next scan will rebuild a (hopefully smaller)
+    -- payload and retry. Logged once per failure (not per scan-tick — caller
+    -- dedupes via lastSnapshotHash unless force=true).
+    if APSPrint then
+        APSPrint("QR encode failed (payload too large): "
+                 .. tostring(err) .. " — hex=" .. #hex .. " chars")
+    end
+    return nil
 end
 
 -- State for trigger throttling + dedup
