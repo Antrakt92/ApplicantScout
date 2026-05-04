@@ -36,6 +36,15 @@ local DB_DEFAULTS = {
     -- the addon once and never host LFG don't get stuck with larger manual
     -- screenshots forever. nil = never bumped (no restore needed).
     priorScreenshotQuality = nil,
+    -- PVEFrame movement state. nil = never moved (use Blizzard's UIPanelLayout
+    -- default). Once user Alt+drags the LFG window, OnDragStop writes
+    -- {point, x, y} from GetPoint(); OnShow restore replays it next time
+    -- the panel opens. Defensive PLAYER_LOGOUT save catches positions changed
+    -- via slash macros / scripted moves.
+    pveFramePosition = nil,
+    -- Lock toggle for the LFG window drag. When true, _OnPVEFrameDragStart
+    -- early-returns so Alt+drag is no-op. User-toggleable in settings panel.
+    lockPVEFrame = false,
 }
 
 -- Session lifecycle. INVARIANT: isSessionActive == true ⇔ companion overlay
@@ -107,7 +116,17 @@ local SafeStr, APSPrint, InitDB, StartSession, EndSession, CheckSessionTransitio
       MaybeTriggerScreenshot,
       -- Settings panel (pinned above PVEFrame). Forward-decl'd so slash handler
       -- + PLAYER_LOGIN handler can reference before bodies are defined.
-      _SetEnabled, _SetDebug, _AttachSettingsPanel, _AddSettingsRow, _SetWidgetTooltip
+      _SetEnabled, _SetDebug, _AttachSettingsPanel, _AddSettingsRow, _SetWidgetTooltip,
+      -- Visibility coordinator + interaction-frame tracking. Replaces direct
+      -- qrFrame:Show/Hide calls so a single function decides visibility from
+      -- three orthogonal axes: isSessionActive (auto), _qrSuppressedByInteraction
+      -- (auto, see below), qrAlwaysVisible (manual debug override).
+      _RefreshQRVisibility, _RecomputeInteractionSuppression, _TryHookInfoPanels,
+      _OnInteractionEvent,
+      -- PVEFrame movement (Phase 2). Forward-decl'd so PLAYER_LOGIN handler
+      -- and _AttachSettingsPanel's ADDON_LOADED watcher can both reference it
+      -- before the body is defined further down.
+      _SetupPVEFrameMovement
 -- Forward-decl mutable state used by StartSession/EndSession/reset. WHY: those
 -- functions assign via bare `x = ...`; without forward-decl, the `local` keyword
 -- on declarations later in this file would shadow them and the bare assignments
@@ -115,8 +134,14 @@ local SafeStr, APSPrint, InitDB, StartSession, EndSession, CheckSessionTransitio
 -- qrAlwaysVisible is forward-decl'd here so EndSession (above the slash handler
 -- that owns the toggle) can preserve the user's debug visibility setting when
 -- session ends.
+-- _qrSuppressedByInteraction: orthogonal to session/debug — true while any
+-- tracked Blizzard interaction frame (vendor, NPC, quest, mail, bank, taxi,
+-- character, map, etc.) is open. Hides QR so user can read those windows
+-- without the QR overlay obscuring text. Companion misses ~10-30s of emits
+-- while user has interaction window open — acceptable per scope.
 local versionEmittedThisSession, lastSnapshotHash, lastShotTime, pendingShotDirty,
-      qrAlwaysVisible, suppressShotsUntil
+      qrAlwaysVisible, suppressShotsUntil,
+      _qrSuppressedByInteraction
 
 -- Settings panel state. settingsFrame = parent of all widgets; created lazily
 -- in _AttachSettingsPanel. settingsFrameAttached = one-shot init guard.
@@ -204,18 +229,6 @@ StartSession = function()
     lastSnapshotHash = nil
     pendingShotDirty = false
 
-    -- Show QR frame fully visible (alpha=1) for the entire active session.
-    -- Reasoning at top of file: alpha-flicker captured alpha=0 framebuffers
-    -- in real-world WoW setups (Screenshot() outraces SetAlpha propagation),
-    -- so the frame stays painted at alpha=1 from session start to
-    -- EndSession's deferred Hide. Visible cost: covers TOPLEFT minimap region
-    -- while user hosts. /apscout qrvisible toggle still overrides (forces
-    -- visible even outside session, debug aid).
-    if qrFrame then
-        qrFrame:SetAlpha(1)
-        qrFrame:Show()
-    end
-
     -- 0.3s grace before first snapshot. The frame just transitioned from
     -- Hide()'d to Show()+alpha=1 — on some setups (high refresh rate, deferred
     -- compositors, non-integer DPI) the GPU framebuffer needs multiple render
@@ -226,6 +239,19 @@ StartSession = function()
     -- suppressShotsUntil; pendingShotDirty=true ensures the scan-tick drain
     -- retries once the window expires (within ~0.55s of session start).
     suppressShotsUntil = GetTime() + 0.3
+
+    -- Show QR frame fully visible (alpha=1) for the entire active session.
+    -- Reasoning at top of file: alpha-flicker captured alpha=0 framebuffers
+    -- in real-world WoW setups (Screenshot() outraces SetAlpha propagation),
+    -- so the frame stays painted at alpha=1 from session start to
+    -- EndSession's deferred Hide. Visible cost: covers TOPLEFT minimap region
+    -- while user hosts. /apscout qrvisible toggle still overrides (forces
+    -- visible even outside session, debug aid). _qrSuppressedByInteraction
+    -- can also hide it transiently while user has vendor/NPC/etc open.
+    -- _RefreshQRVisibility encodes all three axes; suppressShotsUntil set
+    -- BEFORE the call so the hidden→shown transition guard inside doesn't
+    -- need to overwrite a freshly-set value.
+    _RefreshQRVisibility()
 end
 
 EndSession = function()
@@ -261,11 +287,14 @@ EndSession = function()
     if qrFrame then
         local genAtSchedule = sessionGen
         C_Timer.After(0.3, function()
-            if not isSessionActive
-               and not qrAlwaysVisible
-               and sessionGen == genAtSchedule
-               and qrFrame then
-                qrFrame:Hide()
+            -- Re-enter the visibility coordinator only if we're still in the
+            -- same gen AND the session has actually ended. _RefreshQRVisibility
+            -- handles qrAlwaysVisible (debug override stays visible across
+            -- session boundaries). Without the gen check a fast Start→End→Start
+            -- sequence would apply this old End's "hide" decision atop a fresh
+            -- session's StartSession-driven Show.
+            if sessionGen == genAtSchedule and not isSessionActive then
+                _RefreshQRVisibility()
             end
         end)
     end
@@ -337,6 +366,264 @@ end
 -- state (debug aid for visual inspection). Forward-declared at top so EndSession
 -- can respect the toggle when hiding the frame.
 qrAlwaysVisible = false
+
+-- ───────────────────────────────────────────────────────────
+-- QR auto-fade on Blizzard interaction frames
+--
+-- WHY: at Version 25 with 30 applicants the QR is ~600-900px wide on a 1440p
+-- display — wide enough to obscure most Blizzard panels (vendor, gossip,
+-- quest text, mail, bank, taxi, etc.). Hiding the QR while ANY tracked
+-- interaction frame is open lets the user actually read those windows.
+-- Companion misses the screenshots during the fade window — acceptable
+-- because the user isn't actively monitoring applicants while they're at a
+-- vendor. _RefreshQRVisibility re-arms suppressShotsUntil on each
+-- hidden→shown transition so the next Screenshot() doesn't capture an
+-- unpainted post-Hide frame.
+--
+-- WHY hybrid event + OnShow/OnHide: vendor-class frames have dedicated
+-- events (MERCHANT_SHOW etc) that fire even when third-party addons replace
+-- the Blizzard frame entirely (BetterMerchant, custom gossip overlays).
+-- Info panels (CharacterFrame, WorldMapFrame, EncounterJournalFrame, etc.)
+-- have no dedicated events but are rarely replaced — OnShow/OnHide hooks on
+-- the frame itself are reliable for those.
+--
+-- WHY ADDON_LOADED-driven re-scan: many info panels live in load-on-demand
+-- addons (Blizzard_AchievementUI, Blizzard_EncounterJournal, etc.) and don't
+-- exist at PLAYER_LOGIN. Hooking via re-scan on every ADDON_LOADED catches
+-- them as their addons load. _hookedInfoPanels set keeps re-scans idempotent.
+
+-- desired = true  → event opens an interaction frame (suppress QR)
+-- desired = false → event closes one (clear that slot)
+-- desired = nil   → event ignored (no state change)
+local INTERACTION_EVENT_DESIRED = {
+    MERCHANT_SHOW          = true,  MERCHANT_CLOSED        = false,
+    GOSSIP_SHOW            = true,  GOSSIP_CLOSED          = false,
+    QUEST_DETAIL           = true,  QUEST_GREETING         = true,
+    QUEST_PROGRESS         = true,  QUEST_COMPLETE         = true,
+    QUEST_FINISHED         = false,
+    MAIL_SHOW              = true,  MAIL_CLOSED            = false,
+    BANKFRAME_OPENED       = true,  BANKFRAME_CLOSED       = false,
+    GUILDBANKFRAME_OPENED  = true,  GUILDBANKFRAME_CLOSED  = false,
+    VOID_STORAGE_OPEN      = true,  VOID_STORAGE_CLOSE     = false,
+    TAXIMAP_OPENED         = true,  TAXIMAP_CLOSED         = false,
+    BARBER_SHOP_OPEN       = true,  BARBER_SHOP_CLOSE      = false,
+    TRADE_SHOW             = true,  TRADE_CLOSED           = false,
+    AUCTION_HOUSE_SHOW     = true,  AUCTION_HOUSE_CLOSED   = false,
+    TRADE_SKILL_SHOW       = true,  TRADE_SKILL_CLOSE      = false,
+}
+
+-- Map event name → "kind" (slot key). Multiple events share a slot
+-- (QUEST_DETAIL/GREETING/PROGRESS/COMPLETE all set "quest" true; QUEST_FINISHED
+-- clears it). Set-true events are idempotent — repeated writes don't break
+-- aggregation because they all write the same slot+value.
+local INTERACTION_EVENT_KIND = {
+    MERCHANT_SHOW          = "vendor",       MERCHANT_CLOSED        = "vendor",
+    GOSSIP_SHOW            = "gossip",       GOSSIP_CLOSED          = "gossip",
+    QUEST_DETAIL           = "quest",        QUEST_GREETING         = "quest",
+    QUEST_PROGRESS         = "quest",        QUEST_COMPLETE         = "quest",
+    QUEST_FINISHED         = "quest",
+    MAIL_SHOW              = "mail",         MAIL_CLOSED            = "mail",
+    BANKFRAME_OPENED       = "bank",         BANKFRAME_CLOSED       = "bank",
+    GUILDBANKFRAME_OPENED  = "guildbank",    GUILDBANKFRAME_CLOSED  = "guildbank",
+    VOID_STORAGE_OPEN      = "voidstorage",  VOID_STORAGE_CLOSE     = "voidstorage",
+    TAXIMAP_OPENED         = "taxi",         TAXIMAP_CLOSED         = "taxi",
+    BARBER_SHOP_OPEN       = "barber",       BARBER_SHOP_CLOSE      = "barber",
+    TRADE_SHOW             = "trade",        TRADE_CLOSED           = "trade",
+    AUCTION_HOUSE_SHOW     = "auctionhouse", AUCTION_HOUSE_CLOSED   = "auctionhouse",
+    TRADE_SKILL_SHOW       = "professions",  TRADE_SKILL_CLOSE      = "professions",
+}
+
+-- Frames without dedicated events. OnShow/OnHide hooked when the frame
+-- becomes available. Most are LoD; _TryHookInfoPanels re-runs on
+-- ADDON_LOADED to catch each as it materializes.
+local INFO_PANEL_FRAMES = {
+    "WorldMapFrame", "EncounterJournalFrame", "SpellBookFrame",
+    "PlayerSpellsFrame", "CharacterFrame", "CollectionsJournal",
+    "AchievementFrame", "CommunitiesFrame", "FriendsFrame",
+    "ProfessionsFrame", "FlightMapFrame", "SettingsPanel",
+}
+
+local _interactionSlots = {}  -- kind → bool (only set when active; nil = inactive)
+local _hookedInfoPanels  = {} -- frame name → true once OnShow/OnHide hooks installed
+
+-- Single visibility decision. Three axes:
+--   isSessionActive             — auto: player is hosting an LFG listing
+--   _qrSuppressedByInteraction  — auto: a tracked interaction frame is open
+--   qrAlwaysVisible             — manual: /apscout qrvisible debug override
+-- Debug override wins over interaction fade (user explicitly said "show me").
+_RefreshQRVisibility = function()
+    if not qrFrame then return end
+    local wasShown = qrFrame:IsShown()
+    local shouldShow = (isSessionActive and not _qrSuppressedByInteraction)
+                       or qrAlwaysVisible
+    if shouldShow and not wasShown then
+        qrFrame:SetAlpha(1)
+        qrFrame:Show()
+        -- WHY 0.3s grace on every hidden→shown transition (not just session
+        -- start): the GPU framebuffer needs paint time after Show, same race
+        -- as session-start. Without this, a vendor-close → fast Screenshot
+        -- captures the post-Hide unpainted frame → companion logs "no APS1".
+        -- Reuses the existing suppression mechanism — no parallel state.
+        suppressShotsUntil = GetTime() + 0.3
+        pendingShotDirty = true  -- scan-tick drain retries post-grace
+    elseif not shouldShow and wasShown then
+        qrFrame:Hide()
+    end
+end
+
+-- Aggregator: walks events table + info-panel hooks to determine if any
+-- interaction frame is currently open. Calls _RefreshQRVisibility only when
+-- the suppression boolean actually flips — avoids redundant Show/Hide calls
+-- on every event burst.
+_RecomputeInteractionSuppression = function()
+    local anyActive = false
+    for _, active in pairs(_interactionSlots) do
+        if active then anyActive = true; break end
+    end
+    if not anyActive then
+        for name in pairs(_hookedInfoPanels) do
+            local frame = _G[name]
+            if frame and frame:IsShown() then
+                anyActive = true; break
+            end
+        end
+    end
+    if anyActive ~= (_qrSuppressedByInteraction or false) then
+        _qrSuppressedByInteraction = anyActive
+        _RefreshQRVisibility()
+    end
+end
+
+-- Event-driven slot updater. Idempotent: repeated set-true for the same kind
+-- writes the same slot. desired=nil events filtered upstream by EVENT_HANDLERS
+-- registration (only events present in INTERACTION_EVENT_DESIRED are bound).
+_OnInteractionEvent = function(event)
+    local kind = INTERACTION_EVENT_KIND[event]
+    local desired = INTERACTION_EVENT_DESIRED[event]
+    if not kind or desired == nil then return end
+    -- Sparse storage: false → nil to keep the table minimal; aggregator's
+    -- pairs() loop only walks active slots.
+    _interactionSlots[kind] = desired or nil
+    _RecomputeInteractionSuppression()
+end
+
+-- Lazy hookup. Called at PLAYER_LOGIN and every ADDON_LOADED. Idempotent via
+-- _hookedInfoPanels set — once a frame is hooked, subsequent calls skip it.
+-- Frames not yet existing (LoD that hasn't loaded) are silently skipped;
+-- next ADDON_LOADED triggers another scan.
+_TryHookInfoPanels = function()
+    for _, name in ipairs(INFO_PANEL_FRAMES) do
+        if not _hookedInfoPanels[name] then
+            local frame = _G[name]
+            if frame and frame.HookScript then
+                frame:HookScript("OnShow", _RecomputeInteractionSuppression)
+                frame:HookScript("OnHide", _RecomputeInteractionSuppression)
+                _hookedInfoPanels[name] = true
+            end
+        end
+    end
+end
+
+-- ───────────────────────────────────────────────────────────
+-- PVEFrame movement (Alt+drag, persistent across /reload)
+--
+-- WHY in-place HookScript instead of BlizzMove's PanelDragBarTemplate
+-- secure-handle: BlizzMove's complexity supports DOZENS of frames with
+-- shared combat-lockdown queues. We support exactly one frame (PVEFrame).
+-- SetMovable / RegisterForDrag / OnDragStart / OnDragStop / SetPoint /
+-- SetUserPlaced are all unprotected on PVEFrame in Midnight 12.x — verified
+-- empirically by BlizzMove itself using these APIs directly. The only
+-- protected path is Show/Hide from addon code, which we never call.
+-- SetPoint mid-combat may error on protected frames; guard via
+-- InCombatLockdown().
+--
+-- WHY title-bar-only drag (NOT whole-frame): clicking applicant
+-- buttons / tabs inside PVEFrame must NOT initiate a window drag. Drag from
+-- TitleContainer (or NineSlice fallback) keeps child clicks intact.
+--
+-- WHY pcall on initial SetMovable: future Blizzard policy change could
+-- protect this method on PVEFrame. Pcall fails soft → user falls back to
+-- BlizzMove. No addon-load crash.
+--
+-- WHY BlizzMove cohabitation: if user has BlizzMove installed, defer
+-- entirely (early return). Avoids two competing drag handlers fighting over
+-- the same frame.
+local function _OnPVEFrameDragStart()
+    if InCombatLockdown() then return end
+    if ApplicantScoutDB and ApplicantScoutDB.lockPVEFrame then return end
+    PVEFrame:StartMoving()
+    PVEFrame.apsMoving = true
+end
+
+local function _OnPVEFrameDragStop()
+    if not PVEFrame.apsMoving then return end
+    PVEFrame:StopMovingOrSizing()
+    PVEFrame.apsMoving = false
+    -- WARNING (CLAUDE.md trap): GetPoint() returns nil if no anchor set.
+    -- Guard before writing to DB to avoid clobbering valid prior position
+    -- with a nil entry that next OnShow would silently skip.
+    local point, _, _, x, y = PVEFrame:GetPoint()
+    if point and ApplicantScoutDB then
+        ApplicantScoutDB.pveFramePosition = { point = point, x = x, y = y }
+    end
+end
+
+_SetupPVEFrameMovement = function()
+    if not _G.PVEFrame then return end
+    if PVEFrame.apsMovementSetup then return end  -- idempotent
+
+    -- BlizzMove cohabitation: it owns the frame, no-op our setup.
+    if C_AddOns and C_AddOns.IsAddOnLoaded
+       and C_AddOns.IsAddOnLoaded("BlizzMove") then
+        return
+    end
+
+    -- Defensive: future Blizzard patch might protect SetMovable on PVEFrame.
+    -- Pcall fail-soft so addon load doesn't crash.
+    local ok, err = pcall(PVEFrame.SetMovable, PVEFrame, true)
+    if not ok then
+        APSPrint("|cffff8888warning|r could not enable LFG window movement: "
+                 .. tostring(err) .. " — install BlizzMove if you need this")
+        return
+    end
+    PVEFrame:SetClampedToScreen(true)
+
+    -- Three-tier title-region fallback. TitleContainer is the modern
+    -- (Dragonflight+) title bar widget; NineSlice is the chrome border;
+    -- whole frame is last-resort drag-from-anywhere mode.
+    local titleRegion = PVEFrame.TitleContainer or PVEFrame.NineSlice or PVEFrame
+    titleRegion:EnableMouse(true)
+    titleRegion:RegisterForDrag("LeftButton")
+    -- HookScript chains atop any existing handler. PVEFrame's title widgets
+    -- don't register OnDragStart by default in 12.x, but HookScript is
+    -- forward-compatible if Blizzard adds one later.
+    titleRegion:HookScript("OnDragStart", _OnPVEFrameDragStart)
+    titleRegion:HookScript("OnDragStop", _OnPVEFrameDragStop)
+
+    -- Position restore on every Show. WHY C_Timer.After(0, ...) defer:
+    -- Blizzard's UIPanelLayout positions PVEFrame the same frame OnShow
+    -- fires; inline SetPoint can lose visually for one frame to layout-cache
+    -- restore (visible flicker on /reload). The 0-delay timer dispatches
+    -- next frame after layout cache settles. Re-checks lockdown + IsShown
+    -- since user could close PVEFrame in the one-frame gap.
+    PVEFrame:HookScript("OnShow", function(self)
+        local saved = ApplicantScoutDB and ApplicantScoutDB.pveFramePosition
+        if not (saved and saved.point) then return end
+        if InCombatLockdown() then return end
+        C_Timer.After(0, function()
+            if InCombatLockdown() then return end
+            if not self:IsShown() then return end
+            -- WARNING (CLAUDE.md SetUserPlaced trap): order is
+            -- ClearAllPoints -> SetPoint -> SetUserPlaced(true). Wrong
+            -- order leaks WoW's layout-cache restore atop our anchor.
+            self:ClearAllPoints()
+            self:SetPoint(saved.point, UIParent, saved.point, saved.x, saved.y)
+            self:SetUserPlaced(true)
+        end)
+    end)
+
+    PVEFrame.apsMovementSetup = true
+end
 
 -- Set screenshot format. Reed-Solomon ECC handles JPG quantization noise on
 -- 3-px QR modules but tolerance shrinks vs 4 px — bump quality floor to 8
@@ -894,11 +1181,31 @@ local EVENT_HANDLERS = {
         InitDB()
         MarkDirty("login")
         _AttachSettingsPanel()
+        _SetupPVEFrameMovement()  -- no-ops if BlizzMove loaded OR PVEFrame missing
+        _TryHookInfoPanels()      -- initial scan; ADDON_LOADED catches LoD frames later
     end,
     PLAYER_ENTERING_WORLD            = function()
         EnsureScreenshotCVars()
         CreateQRFrame()
         MarkDirty("pew")
+    end,
+    -- WHY register ADDON_LOADED globally: many info-panel frames live in
+    -- LoD addons (Blizzard_AchievementUI, Blizzard_EncounterJournal, etc.).
+    -- They don't exist at PLAYER_LOGIN. Re-scan on every ADDON_LOADED catches
+    -- each as its addon loads. Cost: ~10-15 fires per session × 12-frame
+    -- iteration = microseconds.
+    ADDON_LOADED                     = function() _TryHookInfoPanels() end,
+    -- WHY persist on logout (Phase 2): PLAYER_LOGOUT fires after UI teardown
+    -- begins but BEFORE SavedVariables flush. Drag-stop covers obvious paths;
+    -- this catches positions changed via slash macros / scripted moves /
+    -- third-party UI that bypasses our drag handlers.
+    PLAYER_LOGOUT                    = function()
+        if PVEFrame and PVEFrame:IsUserPlaced() and ApplicantScoutDB then
+            local point, _, _, x, y = PVEFrame:GetPoint()
+            if point then
+                ApplicantScoutDB.pveFramePosition = { point = point, x = x, y = y }
+            end
+        end
     end,
     LFG_LIST_APPLICANT_LIST_UPDATED  = function() MarkDirty("listupd") end,
     LFG_LIST_APPLICANT_UPDATED       = function() MarkDirty("appupd") end,
@@ -907,6 +1214,15 @@ local EVENT_HANDLERS = {
     GROUP_ROSTER_UPDATE              = function() MarkDirty("roster") end,
     GROUP_LEFT                       = function() MarkDirty("groupleft") end,
 }
+
+-- Bind every interaction event to _OnInteractionEvent. Loop populates the
+-- table directly so the registration loop below picks them up automatically.
+-- Each handler closure captures the event name in its own loop-local — Lua
+-- 5.1+ for-in semantics give per-iteration distinct bindings, so closures
+-- don't share a single mutable upvalue.
+for evt in pairs(INTERACTION_EVENT_DESIRED) do
+    EVENT_HANDLERS[evt] = function() _OnInteractionEvent(evt) end
+end
 
 local frame = CreateFrame("Frame")
 for event in pairs(EVENT_HANDLERS) do frame:RegisterEvent(event) end
@@ -958,9 +1274,10 @@ end)
 -- #00ff7f, "Scout" in white); "×" close glyph at top-right.
 --
 -- Parent=PVEFrame so visibility cascades automatically: open LFG → panel
--- appears, close LFG → panel hides. Anchor BOTTOMRIGHT-of-self to TOPRIGHT-of-
--- PVEFrame with a small visible gap — flush with PVEFrame's right edge,
--- mirroring info-side-panel placement.
+-- appears, close LFG → panel hides. Anchor BOTTOMLEFT-of-self to TOPLEFT-of-
+-- PVEFrame with a small visible gap — right-side anchoring (BOTTOMRIGHT to
+-- TOPRIGHT) lands inside PVEFrame's nine-slice chrome and renders nothing
+-- visible, so the panel hangs above PVEFrame's left edge instead.
 --
 -- DIALOG strata (explicit) keeps the panel above HUD elements; Blizzard popups
 -- (StaticPopup, ColorPicker — both toplevel=true) auto-lift above it. We do
@@ -1048,11 +1365,6 @@ local _SETTINGS_CONTENT_TOP_OFFSET = _SETTINGS_TOP_PAD
                                      + _SETTINGS_TITLE_HEIGHT
                                      + _SETTINGS_TITLE_GAP
 
--- Brand colour: #00ff7f — same green that wraps "ApplicantScout" in chat
--- prints (`|cff00ff7f...|r`). Used for the title only; chrome is Blizzard
--- tooltip-style so the panel reads as a native WoW addon UI.
-local _BRAND_R, _BRAND_G, _BRAND_B = 0.00, 1.00, 0.498
-
 -- Caller convention: widget already has parent=settingsFrame when created.
 -- Helper does NOT call SetParent — explicit ownership, less magic.
 -- Frame height = top offset + content (rows + interior gaps) + bottom pad.
@@ -1088,6 +1400,9 @@ _AttachSettingsPanel = function()
                 self:UnregisterAllEvents()
                 self:SetScript("OnEvent", nil)
                 _AttachSettingsPanel()
+                -- Same lazy-init opportunity for movement setup. DRY: don't
+                -- spawn a separate watcher.
+                _SetupPVEFrameMovement()
             end
         end)
         return
@@ -1100,11 +1415,12 @@ _AttachSettingsPanel = function()
         "BackdropTemplate"
     )
     settingsFrame:SetSize(_SETTINGS_FRAME_WIDTH, 88)  -- placeholder; _AddSettingsRow grows
-    -- Anchor BOTTOMRIGHT of panel to TOPRIGHT of PVEFrame: panel hangs ABOVE
-    -- PVEFrame, flush right edge. Mirrors info-side-panel placement (RaiderIO
-    -- etc) and stops the panel from competing with PVEFrame's left-side icon
-    -- and title for top-left attention.
-    settingsFrame:SetPoint("BOTTOMRIGHT", PVEFrame, "TOPRIGHT", 0, 6)
+    -- Anchor BOTTOMLEFT of panel to TOPLEFT of PVEFrame +6 px gap. WHY left
+    -- side: BOTTOMRIGHT-to-TOPRIGHT placed the panel inside PVEFrame's nine-
+    -- slice chrome / close-button hit zone and rendered nothing visible. Left-
+    -- side placement is the known-good anchor — panel hangs cleanly above the
+    -- PVEFrame title bar with no chrome interference.
+    settingsFrame:SetPoint("BOTTOMLEFT", PVEFrame, "TOPLEFT", 0, 6)
     settingsFrame:SetClampedToScreen(true)
     settingsFrame:SetFrameStrata("DIALOG")
 
@@ -1194,15 +1510,66 @@ _AttachSettingsPanel = function()
     )
     _AddSettingsRow(debugCheckbox)
 
+    -- Lock LFG window position. When checked, Alt+drag on the LFG window
+    -- title bar is no-op (handler early-returns). DB-direct toggle — no
+    -- _SetX wrapper needed because there's no teardown / sync work; the
+    -- drag handler reads ApplicantScoutDB.lockPVEFrame on each event.
+    local lockPVECheckbox = CreateFrame(
+        "CheckButton",
+        "ApplicantScoutSettingsLockPVECheckbox",
+        settingsFrame,
+        "UICheckButtonTemplate"
+    )
+    _StyleCheckboxLabel(lockPVECheckbox, "Lock LFG window position")
+    lockPVECheckbox:SetScript("OnClick", function(self)
+        ApplicantScoutDB.lockPVEFrame = not not self:GetChecked()
+    end)
+    lockPVECheckbox:SetHitRectInsets(0, -180, 0, 0)
+    _SetWidgetTooltip(
+        lockPVECheckbox,
+        "Lock LFG window position",
+        "When checked, Alt+drag on the LFG window's title bar is disabled. Position remains where it was last saved. Useful once you've found the right spot and don't want to nudge it accidentally."
+    )
+    _AddSettingsRow(lockPVECheckbox)
+
+    -- Reset LFG window position. Clears saved coords + reapplies Blizzard's
+    -- UIPanelLayout default by hide+show cycle. Brief flicker but reliable;
+    -- only fires on explicit user click.
+    local resetPVEBtn = CreateFrame(
+        "Button",
+        "ApplicantScoutSettingsResetPVEBtn",
+        settingsFrame,
+        "UIPanelButtonTemplate"
+    )
+    resetPVEBtn:SetSize(220, 22)
+    resetPVEBtn:SetText("Reset LFG window position")
+    resetPVEBtn:SetScript("OnClick", function()
+        ApplicantScoutDB.pveFramePosition = nil
+        if PVEFrame and PVEFrame:IsShown() and not InCombatLockdown() then
+            PVEFrame:SetUserPlaced(false)
+            HideUIPanel(PVEFrame)
+            ShowUIPanel(PVEFrame)
+        end
+        APSPrint("LFG window position reset to Blizzard default")
+    end)
+    _SetWidgetTooltip(
+        resetPVEBtn,
+        "Reset LFG window position",
+        "Clears the saved position and re-applies Blizzard's default UIPanelLayout slot. The window briefly closes and reopens to apply the reset."
+    )
+    _AddSettingsRow(resetPVEBtn)
+
     -- Re-sync checkboxes from DB on each show. Handles slash-toggle-while-
     -- panel-was-hidden case: open via /apscout config → checkboxes reflect DB truth.
     settingsFrame:HookScript("OnShow", function()
         enabledCheckbox:SetChecked(ApplicantScoutDB.enabled)
         debugCheckbox:SetChecked(ApplicantScoutDB.debug)
+        lockPVECheckbox:SetChecked(ApplicantScoutDB.lockPVEFrame)
     end)
 
     enabledCheckbox:SetChecked(ApplicantScoutDB.enabled)
     debugCheckbox:SetChecked(ApplicantScoutDB.debug)
+    lockPVECheckbox:SetChecked(ApplicantScoutDB.lockPVEFrame)
 
     settingsFrameAttached = true  -- LAST: any earlier failure leaves false → retry next PLAYER_LOGIN
 end
@@ -1300,6 +1667,32 @@ SlashCmdList.APSCOUT = function(msg)
                       i, applicants[i], tostring(info.applicantStatus), tostring(info.numMembers)))
             end
         end
+        -- Phase 1 + 2 diagnostics
+        print("|cff00ff7f---|r visibility:")
+        print("  QR suppressed by interaction: " .. tostring(_qrSuppressedByInteraction or false))
+        local activeKinds = {}
+        for kind, active in pairs(_interactionSlots) do
+            if active then activeKinds[#activeKinds + 1] = kind end
+        end
+        print("  active interaction slots: " .. (#activeKinds > 0
+              and table.concat(activeKinds, ", ") or "(none)"))
+        local hookedCount = 0
+        for _ in pairs(_hookedInfoPanels) do hookedCount = hookedCount + 1 end
+        print("  info panels hooked: " .. hookedCount .. "/" .. #INFO_PANEL_FRAMES)
+        print("|cff00ff7f---|r LFG window:")
+        local hasBlizzMove = C_AddOns and C_AddOns.IsAddOnLoaded
+                             and C_AddOns.IsAddOnLoaded("BlizzMove") or false
+        print("  BlizzMove loaded: " .. tostring(hasBlizzMove))
+        print("  movement setup: " .. tostring(PVEFrame
+              and PVEFrame.apsMovementSetup or false))
+        if ApplicantScoutDB.pveFramePosition then
+            local pos = ApplicantScoutDB.pveFramePosition
+            print(string.format("  saved position: %s @ (%.0f, %.0f)",
+                  tostring(pos.point), pos.x or 0, pos.y or 0))
+        else
+            print("  saved position: (default)")
+        end
+        print("  lock: " .. tostring(ApplicantScoutDB.lockPVEFrame))
     elseif msg == "taintcheck" then
         -- One-shot diagnostic. Slash-handler frame is hardware-event-rooted
         -- (clean). Reads C_LFGList directly + per-field issecretvalue dump.
@@ -1347,21 +1740,14 @@ SlashCmdList.APSCOUT = function(msg)
         MaybeTriggerScreenshot(true)
         APSPrint("forced snapshot — check Screenshots/ folder")
     elseif msg == "qrvisible" then
-        -- Toggle frame visibility OUTSIDE active session (debug aid for
-        -- inspecting last-painted QR contents without hosting LFG). During
-        -- an active session the frame is alpha=1 anyway — toggle is a no-op
-        -- there. With qrAlwaysVisible=true: frame stays Show()'d at alpha=1
-        -- across StartSession→EndSession boundaries; with false: EndSession's
-        -- deferred Hide() reaches the frame as designed.
+        -- Toggle debug-visible override. _RefreshQRVisibility resolves all four
+        -- corners of the (qrAlwaysVisible × isSessionActive) cross-product
+        -- correctly via the (sessionActive AND NOT suppressed) OR alwaysVisible
+        -- formula — no nested if needed here. Bonus: qrAlwaysVisible=true now
+        -- correctly un-suppresses an interaction-faded QR (debug intent: show
+        -- regardless).
         qrAlwaysVisible = not qrAlwaysVisible
-        if qrFrame then
-            if qrAlwaysVisible then
-                qrFrame:SetAlpha(1)
-                qrFrame:Show()
-            elseif not isSessionActive then
-                qrFrame:Hide()  -- not hosting → off; mid-session toggle stays alpha=1
-            end
-        end
+        _RefreshQRVisibility()
         APSPrint("QR frame always-visible: " .. tostring(qrAlwaysVisible))
     elseif msg == "debug" or msg == "debug on" then
         _SetDebug(true)
