@@ -120,8 +120,8 @@ local versionEmittedThisSession, lastSnapshotHash, lastShotTime, pendingShotDirt
 
 -- Settings panel state. settingsFrame = parent of all widgets; created lazily
 -- in _AttachSettingsPanel. settingsFrameAttached = one-shot init guard.
--- stackedHeight = current content height (Inset-relative), used by
--- _AddSettingsRow to position next widget + resize frame.
+-- stackedHeight = running tally of (rowHeight + ROW_GAP) used by
+-- _AddSettingsRow to anchor next widget under the title and resize the frame.
 local settingsFrame, enabledCheckbox, debugCheckbox
 local settingsFrameAttached = false
 local stackedHeight = 0
@@ -951,17 +951,16 @@ end)
 
 
 -- ───────────────────────────────────────────────────────────
--- Settings panel: pinned above PVEFrame (LFG window) with custom modern chrome.
---
--- Visual language: 1 px brand-green (#00ff7f) border at low alpha, near-black
--- translucent fill, header strip carrying a brand-tinted gradient + title text
--- + minimal "×" close glyph. Pattern mirrors RaiderIO / BigWigs / DBM tooltips
--- (clean, content-first, no "carved stone" Blizzard chrome). Cheaper visually
--- than BasicFrameTemplateWithInset and matches the addon's brand identity.
+-- Settings panel: pinned above PVEFrame (LFG window) with Blizzard tooltip-style
+-- chrome. Same backdrop/border textures as GameTooltip (and RaiderIO, Details,
+-- BigWigs popups) so the panel reads as a native WoW UI element next to PVEFrame
+-- instead of a foreign-styled box. Brand-green title only ("Applicant" in
+-- #00ff7f, "Scout" in white); "×" close glyph at top-right.
 --
 -- Parent=PVEFrame so visibility cascades automatically: open LFG → panel
--- appears, close LFG → panel hides. Anchor BOTTOMLEFT-of-self to TOPLEFT-of-
--- PVEFrame with a small visible gap.
+-- appears, close LFG → panel hides. Anchor BOTTOMRIGHT-of-self to TOPRIGHT-of-
+-- PVEFrame with a small visible gap — flush with PVEFrame's right edge,
+-- mirroring info-side-panel placement.
 --
 -- DIALOG strata (explicit) keeps the panel above HUD elements; Blizzard popups
 -- (StaticPopup, ColorPicker — both toplevel=true) auto-lift above it. We do
@@ -1034,26 +1033,31 @@ _SetDebug = function(flag)
     APSPrint("debug " .. (flag and "ON — every scan/emit will print" or "OFF"))
 end
 
--- Layout constants for the modern custom-chrome panel.
-local _SETTINGS_HEADER_HEIGHT = 26       -- top strip (title text + close glyph)
-local _SETTINGS_TITLE_BOTTOM_GAP = 8     -- breathing room below header separator
-local _SETTINGS_CONTENT_BOTTOM_PAD = 10  -- breathing room below last row
-local _SETTINGS_DEFAULT_ROW_HEIGHT = 22
-local _SETTINGS_ROW_GAP = 6              -- airier gaps for modern feel
-local _SETTINGS_FRAME_WIDTH = 260
+-- Layout constants for the Blizzard-tooltip-style panel chrome.
+local _SETTINGS_FRAME_WIDTH = 240
+local _SETTINGS_TOP_PAD = 10        -- clearance under the rope-border top edge
+local _SETTINGS_BOTTOM_PAD = 8      -- clearance above rope-border bottom edge
 local _SETTINGS_LEFT_PAD = 14
--- Y offset of first widget row from the frame TOPLEFT (= header + gap below).
-local _SETTINGS_CONTENT_TOP_OFFSET = _SETTINGS_HEADER_HEIGHT
-                                     + _SETTINGS_TITLE_BOTTOM_GAP
+local _SETTINGS_RIGHT_PAD = 12
+local _SETTINGS_TITLE_HEIGHT = 16
+local _SETTINGS_TITLE_GAP = 6       -- gap between title row and first widget
+local _SETTINGS_DEFAULT_ROW_HEIGHT = 22
+local _SETTINGS_ROW_GAP = 4         -- gap BETWEEN rows; not added after last row
+-- Y offset of first widget row from the frame TOPLEFT.
+local _SETTINGS_CONTENT_TOP_OFFSET = _SETTINGS_TOP_PAD
+                                     + _SETTINGS_TITLE_HEIGHT
+                                     + _SETTINGS_TITLE_GAP
 
--- Brand colour: #00ff7f — the same green that wraps "ApplicantScout" in chat
--- prints (`|cff00ff7f...|r`). Surfacing it in the panel chrome ties the addon
--- visually to its own brand identity and stops the panel from looking like a
--- generic Blizzard menu.
+-- Brand colour: #00ff7f — same green that wraps "ApplicantScout" in chat
+-- prints (`|cff00ff7f...|r`). Used for the title only; chrome is Blizzard
+-- tooltip-style so the panel reads as a native WoW addon UI.
 local _BRAND_R, _BRAND_G, _BRAND_B = 0.00, 1.00, 0.498
 
 -- Caller convention: widget already has parent=settingsFrame when created.
 -- Helper does NOT call SetParent — explicit ownership, less magic.
+-- Frame height = top offset + content (rows + interior gaps) + bottom pad.
+-- We add ROW_GAP after each row in stackedHeight, then subtract it from the
+-- frame size formula so the trailing gap below the last row stays visual zero.
 _AddSettingsRow = function(widget, customHeight)
     local h = customHeight or _SETTINGS_DEFAULT_ROW_HEIGHT
     widget:SetPoint(
@@ -1066,7 +1070,7 @@ _AddSettingsRow = function(widget, customHeight)
     stackedHeight = stackedHeight + h + _SETTINGS_ROW_GAP
     settingsFrame:SetSize(
         _SETTINGS_FRAME_WIDTH,
-        _SETTINGS_CONTENT_TOP_OFFSET + stackedHeight + _SETTINGS_CONTENT_BOTTOM_PAD
+        _SETTINGS_CONTENT_TOP_OFFSET + (stackedHeight - _SETTINGS_ROW_GAP) + _SETTINGS_BOTTOM_PAD
     )
 end
 
@@ -1095,61 +1099,44 @@ _AttachSettingsPanel = function()
         PVEFrame,
         "BackdropTemplate"
     )
-    settingsFrame:SetSize(_SETTINGS_FRAME_WIDTH, 100)  -- placeholder; _AddSettingsRow grows
-    settingsFrame:SetPoint("BOTTOMLEFT", PVEFrame, "TOPLEFT", 0, 6)
+    settingsFrame:SetSize(_SETTINGS_FRAME_WIDTH, 88)  -- placeholder; _AddSettingsRow grows
+    -- Anchor BOTTOMRIGHT of panel to TOPRIGHT of PVEFrame: panel hangs ABOVE
+    -- PVEFrame, flush right edge. Mirrors info-side-panel placement (RaiderIO
+    -- etc) and stops the panel from competing with PVEFrame's left-side icon
+    -- and title for top-left attention.
+    settingsFrame:SetPoint("BOTTOMRIGHT", PVEFrame, "TOPRIGHT", 0, 6)
     settingsFrame:SetClampedToScreen(true)
     settingsFrame:SetFrameStrata("DIALOG")
 
-    -- Modern flat backdrop: 1 px solid border + dark translucent fill.
-    -- Both files reuse the universal 8×8 white texture; tinting via
-    -- SetBackdropColor / SetBackdropBorderColor controls the look.
+    -- Blizzard tooltip-style chrome: same backdrop+border textures as
+    -- GameTooltip and most established WoW addon panels (RaiderIO, Details,
+    -- BigWigs popups). Reads as a native WoW UI element next to PVEFrame
+    -- instead of a foreign brand-coloured box.
     settingsFrame:SetBackdrop({
-        bgFile   = "Interface\\Buttons\\WHITE8X8",
-        edgeFile = "Interface\\Buttons\\WHITE8X8",
-        edgeSize = 1,
-        insets   = { left = 1, right = 1, top = 1, bottom = 1 },
+        bgFile   = "Interface\\Tooltips\\UI-Tooltip-Background",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        edgeSize = 16,
+        insets   = { left = 5, right = 5, top = 5, bottom = 5 },
+        tile = true,
+        tileSize = 16,
     })
-    settingsFrame:SetBackdropColor(0.05, 0.05, 0.07, 0.94)         -- near-black, slightly translucent
-    settingsFrame:SetBackdropBorderColor(_BRAND_R, _BRAND_G, _BRAND_B, 0.55)  -- brand-green hairline
+    settingsFrame:SetBackdropColor(0.05, 0.07, 0.10, 0.95)        -- near-black, slightly translucent
+    settingsFrame:SetBackdropBorderColor(1, 1, 1, 1)              -- tooltip-border texture supplies its own gold rope
 
-    -- Header strip: brand-tinted band carrying title + close glyph. Subtle
-    -- horizontal gradient (brand → near-transparent) gives the panel a touch
-    -- of directional flair without the heavy "carved stone" Blizzard look.
-    local header = settingsFrame:CreateTexture(nil, "ARTWORK")
-    header:SetPoint("TOPLEFT", settingsFrame, "TOPLEFT", 1, -1)
-    header:SetPoint("TOPRIGHT", settingsFrame, "TOPRIGHT", -1, -1)
-    header:SetHeight(_SETTINGS_HEADER_HEIGHT)
-    header:SetColorTexture(1, 1, 1, 1)  -- placeholder; SetGradient overrides
-    if header.SetGradient then
-        header:SetGradient("HORIZONTAL",
-            CreateColor(_BRAND_R, _BRAND_G, _BRAND_B, 0.22),
-            CreateColor(_BRAND_R, _BRAND_G, _BRAND_B, 0.05))
-    else
-        -- Pre-10.x clients (or stripped custom clients) fall back to a flat tint.
-        header:SetColorTexture(_BRAND_R, _BRAND_G, _BRAND_B, 0.12)
-    end
-
-    -- Hairline separator under the header — same brand colour, slightly
-    -- stronger alpha so the header reads as a distinct strip.
-    local sep = settingsFrame:CreateTexture(nil, "ARTWORK", nil, 1)
-    sep:SetPoint("TOPLEFT", header, "BOTTOMLEFT", 0, 0)
-    sep:SetPoint("TOPRIGHT", header, "BOTTOMRIGHT", 0, 0)
-    sep:SetHeight(1)
-    sep:SetColorTexture(_BRAND_R, _BRAND_G, _BRAND_B, 0.40)
-
-    -- Title — branded "Applicant" in green, "Scout" in white. GameFontHighlight
-    -- (vs GameFontNormal) gives a pure-white reset color after the |r escape so
-    -- "Scout" reads cleanly against the dark panel instead of the yellowy
-    -- header-text default.
+    -- Title — branded "Applicant" in green, "Scout" in white. Sits in the top
+    -- inset area; GameFontHighlight gives a pure-white reset after |r so
+    -- "Scout" reads cleanly against the dark fill instead of GameFontNormal's
+    -- yellowy default.
     local title = settingsFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-    title:SetPoint("LEFT", header, "LEFT", _SETTINGS_LEFT_PAD - 4, 0)
+    title:SetPoint("TOPLEFT", settingsFrame, "TOPLEFT", _SETTINGS_LEFT_PAD, -_SETTINGS_TOP_PAD)
     title:SetText("|cff00ff7fApplicant|rScout")
 
-    -- Close glyph "×" — minimal, hover lights up red. Mirrors modern web-style
-    -- modal close buttons; way lighter than Blizzard's Interface\Buttons texture.
+    -- Close glyph "×" — minimal, hover lights up red. Sits in the top-right
+    -- inset area opposite the title.
+    local closeBtnSize = _SETTINGS_TITLE_HEIGHT + 4
     local closeBtn = CreateFrame("Button", nil, settingsFrame)
-    closeBtn:SetSize(_SETTINGS_HEADER_HEIGHT, _SETTINGS_HEADER_HEIGHT)
-    closeBtn:SetPoint("RIGHT", header, "RIGHT", -2, 0)
+    closeBtn:SetSize(closeBtnSize, closeBtnSize)
+    closeBtn:SetPoint("TOPRIGHT", settingsFrame, "TOPRIGHT", -_SETTINGS_RIGHT_PAD + 4, -(_SETTINGS_TOP_PAD - 4))
     local closeText = closeBtn:CreateFontString(nil, "OVERLAY", "GameFontHighlightLarge")
     closeText:SetPoint("CENTER", closeBtn, "CENTER", 0, 1)  -- +1 visually centres the glyph
     closeText:SetText("×")
