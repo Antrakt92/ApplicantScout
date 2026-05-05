@@ -31,10 +31,10 @@ local DB_DEFAULTS = {
     -- absent we force `debug=false` exactly once, then mark migrated so
     -- subsequent user toggles persist normally.
     debugDefaultMigrated = false,
-    -- Pre-escalation screenshotQuality value, captured on the first session
-    -- where we bumped CVar to 8. Restored on /apscout off so users who run
-    -- the addon once and never host LFG don't get stuck with larger manual
-    -- screenshots forever. nil = never bumped (no restore needed).
+    -- Pre-transport screenshot CVar values, captured once when we force
+    -- screenshotQuality/screenshotFormat for QR reliability. Restored on
+    -- /apscout off so users who run the addon once don't get stuck with larger
+    -- JPG manual screenshots forever. nil = never changed by us.
     priorScreenshotQuality = nil,
     priorScreenshotFormat = nil,
     -- PVEFrame movement state. nil = never moved (use Blizzard's UIPanelLayout
