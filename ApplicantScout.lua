@@ -36,6 +36,7 @@ local DB_DEFAULTS = {
     -- the addon once and never host LFG don't get stuck with larger manual
     -- screenshots forever. nil = never bumped (no restore needed).
     priorScreenshotQuality = nil,
+    priorScreenshotFormat = nil,
     -- PVEFrame movement state. nil = never moved (use Blizzard's UIPanelLayout
     -- default). Once user Alt+drags the LFG window, OnDragStop writes
     -- {point, x, y} from GetPoint(); OnShow restore replays it next time
@@ -136,7 +137,7 @@ local SafeStr, APSPrint, InitDB, StartSession, EndSession, CheckSessionTransitio
 -- character, map, etc.) is open. Hides QR so user can read those windows
 -- without the QR overlay obscuring text. Companion misses ~10-30s of emits
 -- while user has interaction window open — acceptable per scope.
-local versionEmittedThisSession, lastSnapshotHash, lastShotTime, pendingShotDirty,
+local lastSnapshotHash, lastShotTime, pendingShotDirty,
       qrAlwaysVisible, suppressShotsUntil,
       _qrSuppressedByInteraction
 
@@ -256,12 +257,8 @@ StartSession = function()
     sessionGen = sessionGen + 1
 
     -- QR transport state reset: force fresh full snapshot at session start.
-    -- versionEmittedThisSession is now a diag flag only — BuildPayload emits
-    -- VERSION on every shot, not just the first, to handle the
-    -- companion-launched-mid-session case (companion needs realm/region info
-    -- from the freshest backlog snapshot, which previously lacked the version
-    -- block once `emittedThisSession` had latched true).
-    versionEmittedThisSession = false
+    -- BuildPayload emits VERSION on every shot so companion-launched-mid-session
+    -- still receives region/realm info from the freshest backlog snapshot.
     lastSnapshotHash = nil
     pendingShotDirty = false
 
@@ -305,7 +302,6 @@ EndSession = function()
     -- removes all applicants, clears listing → overlay hides. Bypasses dedup +
     -- throttle (force=true) since this is one-shot terminal event.
     MaybeTriggerScreenshot(true)
-    versionEmittedThisSession = false  -- diag flag only (BuildPayload now emits VERSION every shot)
     -- Defensive: force-shot path resets pendingShotDirty on success, but if it
     -- early-returned (qrFrame missing, QR encode failure) the flag could persist
     -- across sessions and trigger empty drains in the scan ticker. Clear here.
@@ -672,7 +668,7 @@ end
 -- also get this quality (acceptable side-effect, undone on /apscout off via
 -- RestoreScreenshotCVars).
 local function EnsureScreenshotCVars()
-    if not SetCVar then return end
+    if not (SetCVar and GetCVar) then return end
     local q = tonumber(GetCVar("screenshotQuality")) or 0
     if q < 8 then
         -- Stash original ONCE — if user already disabled+enabled this would
@@ -695,26 +691,61 @@ local function EnsureScreenshotCVars()
                      ") for QR-decode reliability with 3-px modules")
         end
     end
-    SetCVar("screenshotFormat", "jpg")
-end
-
--- Restore the user's pre-addon screenshotQuality on /apscout off. Only acts
--- if we actually bumped CVar at some point (priorScreenshotQuality non-nil).
--- Clears the stash after restore so a fresh enable+escalate cycle records
--- the THEN-current value (which would be 8 if user re-enables).
-local function RestoreScreenshotCVars()
-    if not SetCVar then return end
-    if not (ApplicantScoutDB and ApplicantScoutDB.priorScreenshotQuality) then
-        return
-    end
-    local prior = tonumber(ApplicantScoutDB.priorScreenshotQuality) or 0
-    if prior >= 0 and prior <= 10 then
-        SetCVar("screenshotQuality", tostring(prior))
-        if APSPrint then
-            APSPrint("restored screenshotQuality=" .. prior .. " (pre-ApplicantScout value)")
+    local currentFormat = tostring(GetCVar("screenshotFormat") or "")
+    if currentFormat:lower() ~= "jpg" then
+        if ApplicantScoutDB and ApplicantScoutDB.priorScreenshotFormat == nil then
+            ApplicantScoutDB.priorScreenshotFormat = currentFormat
+        end
+        SetCVar("screenshotFormat", "jpg")
+        local verifyFormat = tostring(GetCVar("screenshotFormat") or "")
+        if verifyFormat:lower() ~= "jpg" then
+            if APSPrint then
+                APSPrint("WARN: screenshotFormat SetCVar didn't stick (read back " ..
+                         verifyFormat .. "); QR transport expects JPG screenshots")
+            end
+        elseif APSPrint then
+            APSPrint("set screenshotFormat=jpg (was " .. currentFormat ..
+                     ") for QR screenshot transport")
         end
     end
-    ApplicantScoutDB.priorScreenshotQuality = nil
+end
+
+-- Restore the user's pre-addon screenshot CVars on /apscout off. Each stash is
+-- restored independently so one missing prior value never blocks the other.
+-- Clears stashes after restore/skip so a fresh enable cycle records the
+-- THEN-current values.
+local function RestoreScreenshotCVars()
+    if not (SetCVar and GetCVar) then return end
+    if not ApplicantScoutDB then return end
+
+    if ApplicantScoutDB.priorScreenshotQuality ~= nil then
+        local prior = tonumber(ApplicantScoutDB.priorScreenshotQuality) or 0
+        if prior >= 0 and prior <= 10 then
+            SetCVar("screenshotQuality", tostring(prior))
+            if APSPrint then
+                APSPrint("restored screenshotQuality=" .. prior .. " (pre-ApplicantScout value)")
+            end
+        end
+        ApplicantScoutDB.priorScreenshotQuality = nil
+    end
+
+    if ApplicantScoutDB.priorScreenshotFormat ~= nil then
+        local priorFormat = tostring(ApplicantScoutDB.priorScreenshotFormat or "")
+        local currentFormat = tostring(GetCVar("screenshotFormat") or "")
+        if priorFormat ~= "" then
+            if currentFormat:lower() == "jpg" then
+                SetCVar("screenshotFormat", priorFormat)
+                if APSPrint then
+                    APSPrint("restored screenshotFormat=" .. priorFormat ..
+                             " (pre-ApplicantScout value)")
+                end
+            elseif APSPrint then
+                APSPrint("kept screenshotFormat=" .. currentFormat ..
+                         " (changed after ApplicantScout forced jpg)")
+            end
+        end
+        ApplicantScoutDB.priorScreenshotFormat = nil
+    end
 end
 
 -- ───────────────────────────────────────────────────────────
@@ -773,10 +804,55 @@ local function _Uint16BE(n)
     return string.char(math.floor(n / 256), n % 256)
 end
 
+-- Return a prefix no longer than maxBytes that never ends inside a UTF-8
+-- sequence. Lua 5.1 has byte strings and no native utf8 library.
+local function _TruncateUTF8Bytes(str, maxBytes)
+    if #str <= maxBytes then return str end
+
+    local start = maxBytes
+    while start > 0 do
+        local b = string.byte(str, start)
+        if not (b and b >= 128 and b <= 191) then
+            break
+        end
+        start = start - 1
+    end
+
+    if start <= 0 then return "" end
+
+    local b = string.byte(str, start)
+    local len
+    if b <= 127 then
+        len = 1
+    elseif b >= 194 and b <= 223 then
+        len = 2
+    elseif b >= 224 and b <= 239 then
+        len = 3
+    elseif b >= 240 and b <= 244 then
+        len = 4
+    else
+        return str:sub(1, start - 1)
+    end
+
+    local endsAt = start + len - 1
+    if endsAt > maxBytes then
+        return str:sub(1, start - 1)
+    end
+
+    for i = start + 1, endsAt do
+        local cb = string.byte(str, i)
+        if not (cb and cb >= 128 and cb <= 191) then
+            return str:sub(1, start - 1)
+        end
+    end
+
+    return str:sub(1, maxBytes)
+end
+
 -- Append len-byte + utf-8 bytes to output table. CLAMPS to 255 bytes (safety).
 local function _PackLenStr(out, str)
     str = SafeStr(str)
-    if #str > 255 then str = str:sub(1, 255) end
+    if #str > 255 then str = _TruncateUTF8Bytes(str, 255) end
     table.insert(out, string.char(#str))
     table.insert(out, str)
 end
@@ -894,8 +970,6 @@ local function BuildPayload(entry, applicantIDs)
     -- "Server not found" silently for the rest of the session. Cost is
     -- ~30-60 bytes per shot (addon+game version strings + region byte + 12-char
     -- realm-qualified name) — negligible vs. QR Version 25-30 capacity.
-    -- versionEmittedThisSession stays as a flag for status diagnostics
-    -- but is no longer load-bearing for emission.
     table.insert(out, string.char(1))
     _PackLenStr(out, ADDON_VERSION)
     local gameVer = (GetBuildInfo and select(1, GetBuildInfo())) or "?"
@@ -909,7 +983,6 @@ local function BuildPayload(entry, applicantIDs)
     local playerRealm = SafeStr(prealm, "")
     local fullName = playerName .. ((playerRealm ~= "") and ("-" .. playerRealm) or "")
     _PackLenStr(out, fullName)
-    versionEmittedThisSession = true
 
     -- Applicants — filter out DEAD_STATUSES + sort by ID for hash stability
     local validApps = {}
@@ -1686,7 +1759,6 @@ SlashCmdList.APSCOUT = function(msg)
         print("  last shot time: " .. (lastShotTime > 0
               and string.format("%.1fs ago", GetTime() - lastShotTime) or "never"))
         print("  pending throttled shot: " .. tostring(pendingShotDirty))
-        print("  versionEmittedThisSession: " .. tostring(versionEmittedThisSession))
         print("  screenshotQuality: " .. tostring(GetCVar("screenshotQuality")))
         print("  screenshotFormat: " .. tostring(GetCVar("screenshotFormat")))
         -- raw API diagnostics
@@ -1778,7 +1850,6 @@ SlashCmdList.APSCOUT = function(msg)
         -- a screenshot regardless of dedup. VERSION block re-emitted so companion
         -- re-syncs region for WCL.
         lastSnapshotHash = nil
-        versionEmittedThisSession = false
         pendingShotDirty = false
         scanDirty = true
         APSPrint("resync queued — next scan-tick (≤0.25s) emits fresh full snapshot")
