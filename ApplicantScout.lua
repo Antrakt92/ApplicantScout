@@ -1,7 +1,8 @@
 -- ApplicantScout — encodes M+ applicant snapshots as a QR code rendered into a
--- TOPLEFT-anchored frame and triggers Screenshot() so the companion (external
--- Python tool) can decode the resulting JPG via pyzbar and show WCL N/H/M/M+
--- percentiles for each applicant.
+-- visible QR frame and triggers Screenshot() so the companion (external Python
+-- tool) can decode the resulting JPG via pyzbar and show WCL N/H/M/M+
+-- percentiles for each applicant. The QR defaults to TOPLEFT but can be moved
+-- with /apscout qrmove.
 --
 -- WHY raw frame, not Ace3: Ace3 shares CallbackHandler-1.0 with other addons
 -- (BetterBags, AlterEgo, ...); their taint contaminates our handler stack and
@@ -43,6 +44,9 @@ local DB_DEFAULTS = {
     -- the panel opens. Defensive PLAYER_LOGOUT save catches positions changed
     -- via slash macros / scripted moves.
     pveFramePosition = nil,
+    -- QR frame position. nil = default TOPLEFT. Stored as canonical top-left
+    -- offsets relative to UIParent: {x=number, y=number}. y is normally <= 0.
+    qrFramePosition = nil,
 }
 
 -- Session lifecycle. INVARIANT: isSessionActive == true ⇔ companion overlay
@@ -79,7 +83,7 @@ local scanDirty = false
 -- DPI scales (first-render-missed-framebuffer). Constant alpha=1 from
 -- StartSession to EndSession deferred-Hide is the only timing-robust mode:
 -- frame is already fully painted by the time any Screenshot() can fire.
--- Trade-off: user sees the QR on TOPLEFT (covers minimap area) for the whole
+-- Trade-off: user sees the QR (defaults TOPLEFT, covers minimap area) for the whole
 -- LFG-hosting duration. Acceptable vs the alternative of "doesn't work".
 --
 -- 3 px/module is a balance between screen footprint and JPG-quantization
@@ -119,8 +123,8 @@ local SafeStr, APSPrint, InitDB, StartSession, EndSession, CheckSessionTransitio
       -- qrFrame:Show/Hide calls so a single function decides visibility from
       -- three orthogonal axes: isSessionActive (auto), _qrSuppressedByInteraction
       -- (auto, see below), qrAlwaysVisible (manual debug override).
-      _RefreshQRVisibility, _RecomputeInteractionSuppression, _TryHookInfoPanels,
-      _OnInteractionEvent,
+      _RefreshQRVisibility, _RefreshQRMouse, _RecomputeInteractionSuppression,
+      _TryHookInfoPanels, _OnInteractionEvent,
       -- PVEFrame movement (Phase 2). Forward-decl'd so PLAYER_LOGIN handler
       -- and _AttachSettingsPanel's ADDON_LOADED watcher can both reference it
       -- before the body is defined further down.
@@ -132,13 +136,15 @@ local SafeStr, APSPrint, InitDB, StartSession, EndSession, CheckSessionTransitio
 -- qrAlwaysVisible is forward-decl'd here so EndSession (above the slash handler
 -- that owns the toggle) can preserve the user's debug visibility setting when
 -- session ends.
+-- qrMoveMode is opt-in mouse/drag mode. Normal visible QR must not capture
+-- mouse input because it sits over gameplay HUD while hosting.
 -- _qrSuppressedByInteraction: orthogonal to session/debug — true while any
 -- tracked Blizzard interaction frame (vendor, NPC, quest, mail, bank, taxi,
 -- character, map, etc.) is open. Hides QR so user can read those windows
 -- without the QR overlay obscuring text. Companion misses ~10-30s of emits
 -- while user has interaction window open — acceptable per scope.
 local lastSnapshotHash, lastShotTime, pendingShotDirty,
-      qrAlwaysVisible, suppressShotsUntil,
+      qrAlwaysVisible, qrMoveMode, suppressShotsUntil,
       _qrSuppressedByInteraction
 
 -- Settings panel state. settingsFrame = parent of all widgets; created lazily
@@ -277,8 +283,8 @@ StartSession = function()
     -- Reasoning at top of file: alpha-flicker captured alpha=0 framebuffers
     -- in real-world WoW setups (Screenshot() outraces SetAlpha propagation),
     -- so the frame stays painted at alpha=1 from session start to
-    -- EndSession's deferred Hide. Visible cost: covers TOPLEFT minimap region
-    -- while user hosts. /apscout qrvisible toggle still overrides (forces
+    -- EndSession's deferred Hide. Visible cost: defaults over TOPLEFT minimap
+    -- region while user hosts. /apscout qrvisible toggle still overrides (forces
     -- visible even outside session, debug aid). _qrSuppressedByInteraction
     -- can also hide it transiently while user has vendor/NPC/etc open.
     -- _RefreshQRVisibility encodes all three axes; suppressShotsUntil set
@@ -369,9 +375,105 @@ end
 -- ───────────────────────────────────────────────────────────
 -- QR frame setup
 --
--- One containing frame in upper-left, sized to whatever QR version we just
--- generated (adaptive). White background covers the entire frame; row-RLE
--- pool of black-rectangle textures draws the QR data.
+-- One containing frame, sized to whatever QR version we just generated
+-- (adaptive). White background covers the entire frame; row-RLE pool of
+-- black-rectangle textures draws the QR data.
+local QR_POSITION_LIMIT = 100000
+
+local function _IsFiniteQRPositionNumber(v)
+    return type(v) == "number" and v == v
+           and v > -QR_POSITION_LIMIT and v < QR_POSITION_LIMIT
+end
+
+local function _NormalizeQRPosition(pos)
+    if type(pos) ~= "table" then return 0, 0, false end
+    local x, y = pos.x, pos.y
+    if not (_IsFiniteQRPositionNumber(x) and _IsFiniteQRPositionNumber(y)) then
+        return 0, 0, false
+    end
+    return x, y, true
+end
+
+local function _ClampQRPosition(x, y, frameSize)
+    frameSize = _IsFiniteQRPositionNumber(frameSize) and frameSize or 64
+    local parentW = UIParent and UIParent:GetWidth() or 0
+    local parentH = UIParent and UIParent:GetHeight() or 0
+    if not _IsFiniteQRPositionNumber(parentW) or parentW <= 0 then parentW = frameSize end
+    if not _IsFiniteQRPositionNumber(parentH) or parentH <= 0 then parentH = frameSize end
+
+    local maxX = parentW - frameSize
+    local minY = frameSize - parentH
+    if maxX < 0 then maxX = 0 end
+    if minY > 0 then minY = 0 end
+
+    if x < 0 then x = 0 elseif x > maxX then x = maxX end
+    if y > 0 then y = 0 elseif y < minY then y = minY end
+    return x, y
+end
+
+local function _GetQRFrameSize()
+    if qrFrame then
+        local w = qrFrame:GetWidth()
+        if _IsFiniteQRPositionNumber(w) and w > 0 then return w end
+    end
+    return qrCurrentSize > 0 and qrCurrentSize or 64
+end
+
+local function _ApplyQRFramePosition()
+    if not qrFrame then return end
+    local x, y = _NormalizeQRPosition(ApplicantScoutDB and ApplicantScoutDB.qrFramePosition)
+    x, y = _ClampQRPosition(x, y, _GetQRFrameSize())
+    qrFrame:ClearAllPoints()
+    qrFrame:SetPoint("TOPLEFT", UIParent, "TOPLEFT", x, y)
+end
+
+local function _SaveQRFramePositionFromFrame()
+    if not (qrFrame and ApplicantScoutDB) then return false end
+    local frameLeft, frameTop = qrFrame:GetLeft(), qrFrame:GetTop()
+    local parentLeft = UIParent and UIParent:GetLeft() or 0
+    local parentTop = UIParent and UIParent:GetTop() or (UIParent and UIParent:GetHeight() or 0)
+    if not (_IsFiniteQRPositionNumber(frameLeft) and _IsFiniteQRPositionNumber(frameTop)
+            and _IsFiniteQRPositionNumber(parentLeft) and _IsFiniteQRPositionNumber(parentTop)) then
+        return false
+    end
+    local x = frameLeft - parentLeft
+    local y = frameTop - parentTop
+    x, y = _ClampQRPosition(x, y, _GetQRFrameSize())
+    ApplicantScoutDB.qrFramePosition = { x = x, y = y }
+    _ApplyQRFramePosition()
+    return true
+end
+
+local function _ResetQRFramePosition()
+    if ApplicantScoutDB then ApplicantScoutDB.qrFramePosition = nil end
+    _ApplyQRFramePosition()
+end
+
+local function _CurrentQRPositionText()
+    if not qrFrame then return "(frame missing)" end
+    local x, y, valid = _NormalizeQRPosition(ApplicantScoutDB and ApplicantScoutDB.qrFramePosition)
+    x, y = _ClampQRPosition(x, y, _GetQRFrameSize())
+    local saved = valid and "saved" or "default"
+    return string.format("%s @ (%.0f, %.0f)", saved, x, y)
+end
+
+local function _OnQRFrameDragStart(self)
+    if not qrMoveMode or not IsAltKeyDown() then return end
+    local ok = pcall(self.StartMoving, self)
+    if ok then self.apsMoving = true end
+end
+
+local function _OnQRFrameDragStop(self)
+    if not self.apsMoving then return end
+    pcall(self.StopMovingOrSizing, self)
+    self.apsMoving = false
+    if _SaveQRFramePositionFromFrame() then
+        APSPrint("QR position saved: " .. _CurrentQRPositionText())
+    else
+        APSPrint("QR position not saved — frame anchor unavailable")
+    end
+end
+
 local function CreateQRFrame()
     if qrFrameCreated then return end
     qrFrame = CreateFrame("Frame", "ApplicantScoutQRFrame", UIParent)
@@ -381,7 +483,12 @@ local function CreateQRFrame()
     -- empirically observed to interfere with input chain on heavy renders.
     qrFrame:SetFrameStrata("DIALOG")
     qrFrame:SetSize(64, 64)  -- placeholder; PaintQR resizes per-snapshot
-    qrFrame:SetPoint("TOPLEFT", UIParent, "TOPLEFT", 0, 0)
+    qrFrame:SetMovable(true)
+    qrFrame:SetClampedToScreen(true)
+    qrFrame:RegisterForDrag("LeftButton")
+    qrFrame:SetScript("OnDragStart", _OnQRFrameDragStart)
+    qrFrame:SetScript("OnDragStop", _OnQRFrameDragStop)
+    _ApplyQRFramePosition()
 
     -- White background — single texture covering the whole frame, BACKGROUND
     -- layer. Black module textures (BORDER layer above) overlay it. pyzbar's
@@ -394,6 +501,7 @@ local function CreateQRFrame()
     qrFrameCreated = true
     -- Hidden by default. StartSession does Show()+SetAlpha(1); EndSession
     -- defers Hide() 0.3s after final clear-shot fires.
+    if _RefreshQRMouse then _RefreshQRMouse() end
     qrFrame:Hide()
 end
 
@@ -401,6 +509,7 @@ end
 -- state (debug aid for visual inspection). Forward-declared at top so EndSession
 -- can respect the toggle when hiding the frame.
 qrAlwaysVisible = false
+qrMoveMode = false
 
 -- ───────────────────────────────────────────────────────────
 -- QR auto-fade on Blizzard interaction frames
@@ -487,12 +596,19 @@ local _hookedInfoPanels  = {} -- frame name → true once OnShow/OnHide hooks in
 --   isSessionActive             — auto: player is hosting an LFG listing
 --   _qrSuppressedByInteraction  — auto: a tracked interaction frame is open
 --   qrAlwaysVisible             — manual: /apscout qrvisible debug override
+--   qrMoveMode                  — manual: /apscout qrmove drag/debug mode
 -- Debug override wins over interaction fade (user explicitly said "show me").
+_RefreshQRMouse = function()
+    if not qrFrame then return end
+    qrFrame:EnableMouse(qrMoveMode and true or false)
+end
+
 _RefreshQRVisibility = function()
     if not qrFrame then return end
     local wasShown = qrFrame:IsShown()
     local shouldShow = (isSessionActive and not _qrSuppressedByInteraction)
                        or qrAlwaysVisible
+                       or qrMoveMode
     if shouldShow and not wasShown then
         qrFrame:SetAlpha(1)
         qrFrame:Show()
@@ -1106,6 +1222,7 @@ local function PaintQR(matrix)
 
     qrFrame:SetSize(frame_px, frame_px)
     qrCurrentSize = frame_px
+    _ApplyQRFramePosition()
 
     -- Reset texture usage counter — texture references in qrTexturePool stay,
     -- they just get :Show() or :Hide() per frame.
@@ -1499,6 +1616,12 @@ _SetEnabled = function(flag)
     flag = not not flag  -- coerce 1/nil → strict bool so equality compare is sane
     if flag == ApplicantScoutDB.enabled then
         if enabledCheckbox then enabledCheckbox:SetChecked(flag) end
+        if not flag then
+            qrAlwaysVisible = false
+            qrMoveMode = false
+            _RefreshQRMouse()
+            if qrFrame then qrFrame:Hide() end
+        end
         APSPrint(flag and "already enabled" or "already disabled")
         return
     end
@@ -1513,6 +1636,8 @@ _SetEnabled = function(flag)
         -- Reset before EndSession's deferred 0.3s Hide closure fires so it
         -- respects "off" semantics even when user had debug toggle on.
         qrAlwaysVisible = false
+        qrMoveMode = false
+        _RefreshQRMouse()
         -- If no session was active, EndSession didn't schedule deferred Hide;
         -- sync Hide here. Active-session case handled by EndSession.
         if qrFrame and not wasSessionActive then qrFrame:Hide() end
@@ -1706,6 +1831,8 @@ local function PrintHelp()
     print("  /apscout reset          clear dedup cache, force fresh full snapshot")
     print("  /apscout shotnow        force snapshot now (debug / manual sync)")
     print("  /apscout qrvisible      toggle QR frame always-visible (debug aid)")
+    print("  /apscout qrmove         toggle QR move mode (Alt+drag QR frame)")
+    print("  /apscout qrreset        reset QR frame position to top-left")
     print("  /apscout taintcheck     probe C_LFGList field secret-tagging")
     print("  /apscout debug [on|off] toggle debug logging")
 end
@@ -1751,8 +1878,11 @@ SlashCmdList.APSCOUT = function(msg)
         print("  QR frame created: " .. tostring(qrFrameCreated))
         if qrFrame then
             print("  QR frame visible: " .. tostring(qrFrame:IsShown()) ..
-                  " (always-visible mode: " .. tostring(qrAlwaysVisible) .. ")")
+                  " (always-visible mode: " .. tostring(qrAlwaysVisible) ..
+                  ", move mode: " .. tostring(qrMoveMode) .. ")")
             print("  QR frame size: " .. qrCurrentSize .. "×" .. qrCurrentSize .. " px")
+            print("  QR frame position: " .. _CurrentQRPositionText())
+            print("  QR mouse enabled: " .. tostring(qrMoveMode and true or false))
         end
         print("  texture pool: " .. #qrTexturePool .. " (used last paint: " .. qrTextureUsed .. ")")
         print("  last snapshot hash: " .. tostring(lastSnapshotHash))
@@ -1870,6 +2000,17 @@ SlashCmdList.APSCOUT = function(msg)
         qrAlwaysVisible = not qrAlwaysVisible
         _RefreshQRVisibility()
         APSPrint("QR frame always-visible: " .. tostring(qrAlwaysVisible))
+    elseif msg == "qrmove" then
+        -- Explicit move/debug mode. Normal visible QR intentionally has mouse
+        -- disabled so it doesn't intercept HUD clicks while hosting.
+        qrMoveMode = not qrMoveMode
+        _RefreshQRMouse()
+        _RefreshQRVisibility()
+        APSPrint("QR move mode: " .. tostring(qrMoveMode) ..
+                 (qrMoveMode and " — Alt+drag the QR frame to reposition" or ""))
+    elseif msg == "qrreset" then
+        _ResetQRFramePosition()
+        APSPrint("QR position reset: " .. _CurrentQRPositionText())
     elseif msg == "debug" or msg == "debug on" then
         _SetDebug(true)
     elseif msg == "debug off" or msg == "nodebug" then

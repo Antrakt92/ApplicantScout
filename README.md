@@ -1,38 +1,52 @@
 # ApplicantScout
 
-Personal-tool WoW addon — emits M+ applicant data to `/chatlog` for an external Python companion that displays Warcraft Logs N/H/M/M+ percentiles per applicant.
+Personal-tool WoW addon that feeds M+ applicant snapshots to the
+[Applicant Scout Companion](https://github.com/Antrakt92/applicant-scout-companion).
 
-This addon by itself does nothing user-visible — it's the data-source half of a two-component setup.
+The addon is the in-game data-source half of a two-component setup. While you
+host a Mythic+ listing, it renders a QR code in the UI and triggers
+screenshots. The companion watches the WoW `Screenshots` folder,
+decodes the ApplicantScout QR payloads, queries Warcraft Logs, and displays the
+external overlay.
 
 ## Usage
 
-1. Enable WoW chat logging once: `/chatlog`
-2. Create your M+ key listing as usual.
-3. Run the companion process (`applicant-scout-companion`).
+1. Install `ApplicantScout\` into `_retail_\Interface\AddOns\`.
+2. Reload WoW.
+3. Start the Python companion.
+4. Create your Mythic+ listing as usual.
+5. Keep ApplicantScout enabled while scouting applicants.
 
-## Slash commands
+The QR frame defaults to the top-left of the UI and stays visible during an
+active capture session so the screenshot transport is reliable. Use
+`/apscout qrmove` and Alt+drag the QR frame to move it. ApplicantScout
+temporarily raises screenshot quality and uses JPG format while enabled, then
+restores your prior screenshot settings when you turn it off with `/apscout off`.
 
+## Slash Commands
+
+```text
+/apscout on | off       enable or disable capture
+/apscout toggle         flip enabled state
+/apscout config         open or close the settings panel
+/apscout status         show current state and QR diagnostics
+/apscout reset          clear dedup cache and force a fresh snapshot
+/apscout shotnow        force a snapshot now
+/apscout qrvisible      keep the QR frame visible for debugging
+/apscout qrmove         toggle QR move mode; Alt+drag the QR frame
+/apscout qrreset        reset QR frame position to top-left
+/apscout taintcheck     inspect LFG field secret-tagging diagnostics
+/apscout debug [on|off] toggle debug logging
 ```
-/apscout on / off      enable or disable emission
-/apscout status        show current state, applicant count, /chatlog status
-/apscout test          emit a fake applicant + listing for flush verification
-/apscout reset         clear diff cache and re-emit current applicants
-/apscout flush         force /chatlog to flush via LoggingChat toggle
-```
 
-## Emission format
+## Transport
 
-All lines start with `[APSCOUT|` so the companion can grep them out of mixed chat.
+ApplicantScout emits versioned `APS1` snapshots through QR screenshots. The
+payload is binary, CRC-checked, and hex-encoded before QR generation so the
+companion can decode it consistently with `pyzbar`.
 
-| Tag | When | Payload |
-|---|---|---|
-| `[APSCOUT\|VERSION]` | once per login | `version\|gameVersion\|region\|playerName-realm` |
-| `[APSCOUT\|LISTING]` | own listing changes | `activityID\|dungeonName\|listingName\|comment` |
-| `[APSCOUT\|NOLISTING]` | own listing closed | (empty) |
-| `[APSCOUT\|APP\|+]` | new applicant | `id\|name\|class\|specID\|ilvl\|score\|role` |
-| `[APSCOUT\|APP\|=]` | applicant fields changed | (same shape as `+`) |
-| `[APSCOUT\|APP\|-]` | applicant left queue | `id` |
-| `[APSCOUT\|EMPTY]` | applicant set is empty | (empty) |
+The wire protocol is intentionally owned by the addon and companion together;
+run both from matching source versions when developing transport changes.
 
 ## License
 
