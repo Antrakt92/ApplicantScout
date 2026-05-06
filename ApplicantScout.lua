@@ -978,6 +978,36 @@ local function _PackLenStr(out, str)
     table.insert(out, str)
 end
 
+local function _NormalizeKeystoneLevel(value)
+    local n = math.floor(SafeNumber(value, 0))
+    if n >= 2 and n <= 50 then return n end
+    return 0
+end
+
+local function _ExtractKeystoneLevelFromText(value)
+    local s = SafeStr(value, "")
+    if s == "" then return 0 end
+    local m = s:match("%+(%d+)")
+    return _NormalizeKeystoneLevel(m)
+end
+
+local function _GetListingKeystoneLevel(activityID, listingName, listingComment)
+    -- C_LFGList.GetKeystoneForActivity is the listing-level source. Text
+    -- parsing stays as fallback because some custom titles/comments include
+    -- "+N", while Blizzard's active-entry name often does not.
+    local keyLevel = 0
+    if C_LFGList and C_LFGList.GetKeystoneForActivity and activityID > 0 then
+        keyLevel = _NormalizeKeystoneLevel(C_LFGList.GetKeystoneForActivity(activityID))
+    end
+    if keyLevel == 0 then
+        keyLevel = _ExtractKeystoneLevelFromText(listingName)
+    end
+    if keyLevel == 0 then
+        keyLevel = _ExtractKeystoneLevelFromText(listingComment)
+    end
+    return keyLevel
+end
+
 -- CRC32 IEEE-802.3, table-based. Built once at file load (~5KB memory).
 local CRC32_TABLE = {}
 do
@@ -1053,27 +1083,9 @@ local function BuildPayload(entry, applicantIDs)
         local listingName = SafeStr(cleanEntry.name, "?"):gsub("|K[^|]*|k", "")
         local listingComment = SafeStr(cleanEntry.comment, "?")
 
-        -- Keystone level extraction. WHY NOT C_MythicPlus.GetOwnedKeystoneLevel():
-        -- that's the host's BAG keystone, not the listing's target level. Host
-        -- can list a +10 group with a +14 keystone in their bag → wrong number.
-        -- Blizzard does NOT expose a numeric key_level on activityInfoTable
-        -- (minLevel/maxLevel are character level, e.g. 80). The level lives in
-        -- the listing TITLE (auto-named "+N <Dungeon>") or COMMENT (host-typed).
-        -- Parse "+N" from both, take first valid hit. Sane M+ range 2..50.
-        local function _ExtractKeyLevel(s)
-            if type(s) ~= "string" or s == "" then return 0 end
-            local m = s:match("%+(%d+)")
-            if not m then return 0 end
-            local n = tonumber(m)
-            if n and n >= 2 and n <= 50 then return n end
-            return 0
-        end
         local keyLevel = 0
         if isMythicPlus then
-            keyLevel = _ExtractKeyLevel(listingName)
-            if keyLevel == 0 then
-                keyLevel = _ExtractKeyLevel(listingComment)
-            end
+            keyLevel = _GetListingKeystoneLevel(activityID, listingName, listingComment)
         end
 
         table.insert(out, string.char(1))
@@ -1948,9 +1960,20 @@ SlashCmdList.APSCOUT = function(msg)
                     print("  activity.categoryID: " .. SafeDiag(activityInfo.categoryID))
                     print("  activity.difficultyID: " .. SafeDiag(activityInfo.difficultyID))
                 end
+                if C_LFGList.GetKeystoneForActivity then
+                    print("  activity.keystoneLevel: "
+                          .. SafeDiag(C_LFGList.GetKeystoneForActivity(cleanActivityID)))
+                else
+                    print("  activity.keystoneLevel: n/a")
+                end
             end
             print("  entry.name: " .. SafeDiag(entry.name))
             print("  entry.comment: " .. SafeDiag(entry.comment))
+            local statusListingName = SafeStr(entry.name, "?"):gsub("|K[^|]*|k", "")
+            local statusListingComment = SafeStr(entry.comment, "?")
+            print("  derived keyLevel: "
+                  .. tostring(_GetListingKeystoneLevel(
+                      cleanActivityID, statusListingName, statusListingComment)))
         else
             print("  entry: nil")
         end
