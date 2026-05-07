@@ -42,8 +42,9 @@ restores your prior screenshot settings when you turn it off with `/apscout off`
 ## Transport
 
 ApplicantScout emits versioned `APS1` snapshots through QR screenshots. The
-payload is binary, CRC-checked, and hex-encoded before QR generation so the
-companion can decode it consistently with `pyzbar`.
+payload is binary and CRC-checked. QR generation uses legacy hex encoding first,
+then falls back to raw byte mode when a large snapshot would exceed QR capacity.
+The companion accepts both forms.
 
 The wire protocol is intentionally owned by the addon and companion together;
 run both from matching source versions when developing transport changes.
