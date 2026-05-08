@@ -13,9 +13,10 @@ external overlay.
 
 1. Install `ApplicantScout\` into `_retail_\Interface\AddOns\`.
 2. Reload WoW.
-3. Start the local companion from the paired source/dev checkout. The public
-   companion download link is intentionally not published yet; it will be added
-   here when the companion release repo and installer are ready.
+3. Install and start ApplicantScout Companion. Public companion builds are
+   planned for `Antrakt92/ApplicantScout-Companion` GitHub Releases; until the
+   first release is published, run the companion from the paired source/dev
+   checkout.
 4. Create your Mythic+ listing as usual.
 5. Keep ApplicantScout enabled while scouting applicants.
 
@@ -57,6 +58,13 @@ The companion accepts both forms.
 
 The wire protocol is intentionally owned by the addon and companion together;
 run both from matching source versions when developing transport changes.
+
+## Companion Trust Model
+
+The addon and companion use QR screenshots only. ApplicantScout does not read
+WoW memory, inject code, automate gameplay, or use chat messages as a transport.
+Warcraft Logs credentials and OAuth/cache files are stored locally by the
+companion under the current Windows user profile.
 
 ## License
 
