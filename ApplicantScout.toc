@@ -1,6 +1,6 @@
 ## Interface: 120005
 ## Title: |cff00ff7fApplicantScout|r
-## Notes: M+ key host helper - encodes applicant data as a QR code on screen and triggers Screenshot() so the companion (external Python tool) can decode it via pyzbar and show WCL N/H/M/M+ percentiles.
+## Notes: M+ key host helper - emits QR screenshot snapshots for the local companion overlay to show Warcraft Logs applicant context.
 ## Author: Antrakt
 ## Version: 0.1.0-dev
 ## SavedVariables: ApplicantScoutDB

@@ -1,7 +1,7 @@
 # ApplicantScout
 
-Personal-tool WoW addon that feeds M+ applicant snapshots to the
-[Applicant Scout Companion](https://github.com/Antrakt92/applicant-scout-companion).
+Personal-tool WoW addon that feeds M+ applicant snapshots to Applicant Scout
+Companion.
 
 The addon is the in-game data-source half of a two-component setup. While you
 host a Mythic+ listing, it renders a QR code in the UI and triggers
@@ -13,7 +13,8 @@ external overlay.
 
 1. Install `ApplicantScout\` into `_retail_\Interface\AddOns\`.
 2. Reload WoW.
-3. Start the Python companion.
+3. Start the local companion from source/dev checkout. A public companion
+   installer and release repo are still gated on companion-side release work.
 4. Create your Mythic+ listing as usual.
 5. Keep ApplicantScout enabled while scouting applicants.
 
