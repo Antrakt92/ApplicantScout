@@ -94,8 +94,10 @@ local scanDirty = false
 -- texture per module crashes WoW's renderer (verified empirically with the
 -- prior 23400-tile pixel-marker design — UI hard-froze on Show). Row-based
 -- run-length encoding folds adjacent black modules into single rectangle
--- textures — typical QR has ~10-15 runs per row, so 117 rows × 12 runs ≈ 1400
--- textures worst case. Well within the ~5000 safe texture budget.
+-- textures. Large QR versions with high-entropy byte payloads can still reach
+-- several thousand runs, so BuildQRMatrix rejects encode modes whose rendered
+-- run count would exceed QR_TEXTURE_HARD_CAP and falls through to raw/lower-EC
+-- alternatives instead of painting an incomplete QR.
 --
 -- WHY frame stays VISIBLE (alpha=1) for the entire active session, not
 -- alpha=0 between shots: tried alpha-flicker (Show()'d at alpha=0 between
@@ -1030,8 +1032,18 @@ local ROLE_NAME_TO_BYTE = { TANK=0, HEALER=1, DAMAGER=2 }
 local APP_DEAD_STATUSES = {
     cancelled=true, declined=true, failed=true, timedout=true,
     invitedeclined=true, declined_full=true, declined_delisted=true,
-    inviteaccepted=true,
+    invited=true, inviteaccepted=true, none=true,
 }
+
+local function _GetApplicantApplicationStatus(info)
+    -- Current C_LFGList.GetApplicantInfo uses applicationStatus. Keep the older
+    -- applicantStatus spelling as a compatibility fallback for stubs/build drift.
+    local status = SafeEnumKey(info and info.applicationStatus, nil)
+    if status == nil or status == "" then
+        status = SafeEnumKey(info and info.applicantStatus, "")
+    end
+    return status
+end
 
 -- Big-endian uint packing
 local function _Uint32BE(n)
@@ -1285,7 +1297,7 @@ local function BuildPayload(entry, applicantIDs)
             local info = C_LFGList.GetApplicantInfo(id)
             info = SafeTable(info)
             if info then
-                local status = SafeEnumKey(info.applicantStatus, "")
+                local status = _GetApplicantApplicationStatus(info)
                 local memberCount = math.floor(SafeNumber(info.numMembers, 0))
                 if memberCount > 5 then memberCount = 5 end
                 if memberCount > 0 and not APP_DEAD_STATUSES[status] then
@@ -1364,7 +1376,7 @@ local _qrencode = _addonNS.QR.qrcode
 -- Returns the texture or nil if pool exhausted (caller logs warning).
 -- Pool grows as needed; never shrinks. Excess textures from prior larger QRs
 -- are hidden, not destroyed (cheap reuse on next render).
-local QR_TEXTURE_HARD_CAP = 5000  -- safety against runaway texture creation
+local QR_TEXTURE_HARD_CAP = 10000  -- safety against runaway texture creation
 local function _AcquireQRTexture(x, y, w, h)
     qrTextureUsed = qrTextureUsed + 1
     local t = qrTexturePool[qrTextureUsed]
@@ -1382,6 +1394,26 @@ local function _AcquireQRTexture(x, y, w, h)
     t:SetPoint("TOPLEFT", qrFrame, "TOPLEFT", x, -y)
     t:Show()
     return t
+end
+
+local function _CountQRBlackRuns(matrix)
+    local runs = 0
+    for y = 1, #matrix do
+        local row = matrix[y]
+        local inRun = false
+        for x = 1, #row do
+            local isBlack = (row[x] or 0) > 0
+            if isBlack then
+                if not inRun then
+                    runs = runs + 1
+                    inRun = true
+                end
+            else
+                inRun = false
+            end
+        end
+    end
+    return runs
 end
 
 -- Paint a QR matrix (Lua table of tables, value > 0 = black, < 0 = white) into
@@ -1488,10 +1520,11 @@ local function _SetLastQREncodeDiag(mode, payload_bytes, err)
 end
 
 -- Builds QR matrix from payload bytes via embedded lua-qrcode library. The
--- transport ladder intentionally prefers the historical hex path first so
--- already-working payloads keep backward compatibility with legacy companions.
--- Raw bytes are only used when hex overflows, because that's the case that is
--- already broken today (stale overlay until applicant count drops).
+-- transport ladder keeps the historical hex/M path first so already-working
+-- payloads keep backward compatibility with legacy companions. Once hex/M
+-- fails, prefer raw byte-mode before hex/L: raw usually produces a smaller QR
+-- and fewer row-RLE textures, while current companions understand embedded NUL
+-- bytes. Hex/L stays as a last fallback for edge cases where raw encode fails.
 -- WHY pcall: qrencode.lua's get_version_eclevel uses assert() (real Lua error)
 -- on capacity overflow at line 214, NOT the documented (false, errmsg) tuple
 -- return. Plain `local ok, result = _qrencode(...)` lets that error propagate
@@ -1516,13 +1549,11 @@ local function BuildQRMatrix(payload)
     local hex = _HexEncode(payload)
     local attempts = {
         { kind = "hex", data = hex, ec_level = QR_EC_LEVEL, size = #hex, unit = "hex" },
+        { kind = "raw", data = payload, ec_level = QR_EC_LEVEL, size = #payload, unit = "bytes" },
     }
     if QR_EC_LEVEL ~= 1 then
-        table.insert(attempts, { kind = "hex", data = hex, ec_level = 1, size = #hex, unit = "hex" })
-    end
-    table.insert(attempts, { kind = "raw", data = payload, ec_level = QR_EC_LEVEL, size = #payload, unit = "bytes" })
-    if QR_EC_LEVEL ~= 1 then
         table.insert(attempts, { kind = "raw", data = payload, ec_level = 1, size = #payload, unit = "bytes" })
+        table.insert(attempts, { kind = "hex", data = hex, ec_level = 1, size = #hex, unit = "hex" })
     end
 
     local first_label = nil
@@ -1538,15 +1569,22 @@ local function BuildQRMatrix(payload)
         end
         local matrix, err = _TryQrEncode(attempt.data, attempt.ec_level)
         if matrix then
-            _SetLastQREncodeDiag(label, #payload, nil)
-            if APSPrint and ApplicantScoutDB and ApplicantScoutDB.debug and label ~= first_label then
-                APSPrint(string.format(
-                    "[APS-debug] QR fallback %s (%d %s) -> %s (%d bytes payload)",
-                    first_label, first_size, first_unit, label, #payload))
+            local renderRuns = _CountQRBlackRuns(matrix)
+            if renderRuns > QR_TEXTURE_HARD_CAP then
+                failure_parts[#failure_parts + 1] = label .. ": render needs " ..
+                    renderRuns .. " textures > cap " .. QR_TEXTURE_HARD_CAP
+            else
+                _SetLastQREncodeDiag(label, #payload, nil)
+                if APSPrint and ApplicantScoutDB and ApplicantScoutDB.debug and label ~= first_label then
+                    APSPrint(string.format(
+                        "[APS-debug] QR fallback %s (%d %s) -> %s (%d bytes payload, %d textures)",
+                        first_label, first_size, first_unit, label, #payload, renderRuns))
+                end
+                return matrix
             end
-            return matrix
+        else
+            failure_parts[#failure_parts + 1] = label .. ": " .. tostring(err)
         end
-        failure_parts[#failure_parts + 1] = label .. ": " .. tostring(err)
     end
 
     -- All strategies failed. Caller (MaybeTriggerScreenshot) gets nil → skips
@@ -1556,7 +1594,7 @@ local function BuildQRMatrix(payload)
     local err = table.concat(failure_parts, " | ")
     _SetLastQREncodeDiag("failed", #payload, err)
     if APSPrint then
-        APSPrint("QR encode failed (payload too large): "
+        APSPrint("QR build failed (payload too large or too dense to render): "
                  .. tostring(err) .. " — payload=" .. #payload .. " bytes")
     end
     return nil
@@ -2402,7 +2440,7 @@ SlashCmdList.APSCOUT = function(msg)
             local info = (id > 0) and SafeTable(C_LFGList.GetApplicantInfo(id)) or nil
             if info then
                 print(string.format("    #%d id=%s status=%s numMembers=%s",
-                      i, SafeDiag(rawID), SafeDiag(info.applicantStatus),
+                      i, SafeDiag(rawID), SafeDiag(_GetApplicantApplicationStatus(info)),
                       SafeDiag(info.numMembers)))
             else
                 print(string.format("    #%d id=%s status=n/a numMembers=n/a",
@@ -2458,7 +2496,7 @@ SlashCmdList.APSCOUT = function(msg)
             end
             print(string.format("  #%d id=%s (id_secret=%s) status=%s",
                   i, SafeDiag(rawID), tostring(IsSecretValue(rawID)),
-                  info and SafeDiag(info.applicantStatus) or "n/a"))
+                  info and SafeDiag(_GetApplicantApplicationStatus(info)) or "n/a"))
             print(string.format("    name=%s(s=%s) class=%s(s=%s) specID=%s(s=%s)",
                   SafeDiag(name), tostring(IsSecretValue(name)),
                   SafeDiag(class), tostring(IsSecretValue(class)),
