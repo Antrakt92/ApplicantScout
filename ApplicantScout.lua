@@ -808,6 +808,57 @@ end
 -- WHY BlizzMove cohabitation: if user has BlizzMove installed, defer
 -- entirely (early return). Avoids two competing drag handlers fighting over
 -- the same frame.
+local PVE_POSITION_LIMIT = 100000
+local PVE_VALID_POINTS = {
+    CENTER = true,
+    TOP = true,
+    BOTTOM = true,
+    LEFT = true,
+    RIGHT = true,
+    TOPLEFT = true,
+    TOPRIGHT = true,
+    BOTTOMLEFT = true,
+    BOTTOMRIGHT = true,
+}
+
+local function _IsFinitePVEPositionNumber(v)
+    return type(v) == "number" and v == v
+           and v > -PVE_POSITION_LIMIT and v < PVE_POSITION_LIMIT
+end
+
+local function _NormalizePVEFramePosition(pos)
+    if type(pos) ~= "table" then return nil, 0, 0, false end
+    local point, x, y = pos.point, pos.x, pos.y
+    if type(point) ~= "string" or not PVE_VALID_POINTS[point] then
+        return nil, 0, 0, false
+    end
+    if not (_IsFinitePVEPositionNumber(x) and _IsFinitePVEPositionNumber(y)) then
+        return nil, 0, 0, false
+    end
+    return point, x, y, true
+end
+
+local function _ClearInvalidPVEFramePosition()
+    if ApplicantScoutDB then
+        ApplicantScoutDB.pveFramePosition = nil
+    end
+end
+
+local function _SavePVEFramePositionFromFrame(frame)
+    if not (frame and ApplicantScoutDB) then return end
+    -- WARNING: GetPoint() returns nil if no anchor set. Invalid parts should
+    -- not clobber a prior valid position or poison the next restore/status.
+    local point, _, _, x, y = frame:GetPoint()
+    local savedPoint, savedX, savedY, ok =
+        _NormalizePVEFramePosition({ point = point, x = x, y = y })
+    if not ok then return end
+    ApplicantScoutDB.pveFramePosition = {
+        point = savedPoint,
+        x = savedX,
+        y = savedY,
+    }
+end
+
 local function _OnPVEFrameDragStart()
     if InCombatLockdown() then return end
     PVEFrame:StartMoving()
@@ -818,13 +869,7 @@ local function _OnPVEFrameDragStop()
     if not PVEFrame.apsMoving then return end
     PVEFrame:StopMovingOrSizing()
     PVEFrame.apsMoving = false
-    -- WARNING: GetPoint() returns nil if no anchor set.
-    -- Guard before writing to DB to avoid clobbering valid prior position
-    -- with a nil entry that next OnShow would silently skip.
-    local point, _, _, x, y = PVEFrame:GetPoint()
-    if point and ApplicantScoutDB then
-        ApplicantScoutDB.pveFramePosition = { point = point, x = x, y = y }
-    end
+    _SavePVEFramePositionFromFrame(PVEFrame)
 end
 
 _SetupPVEFrameMovement = function()
@@ -867,7 +912,12 @@ _SetupPVEFrameMovement = function()
     -- since user could close PVEFrame in the one-frame gap.
     PVEFrame:HookScript("OnShow", function(self)
         local saved = ApplicantScoutDB and ApplicantScoutDB.pveFramePosition
-        if not (saved and saved.point) then return end
+        if not saved then return end
+        local point, x, y, ok = _NormalizePVEFramePosition(saved)
+        if not ok then
+            _ClearInvalidPVEFramePosition()
+            return
+        end
         if InCombatLockdown() then return end
         C_Timer.After(0, function()
             if InCombatLockdown() then return end
@@ -876,7 +926,7 @@ _SetupPVEFrameMovement = function()
             -- ClearAllPoints -> SetPoint -> SetUserPlaced(true). Wrong
             -- order leaks WoW's layout-cache restore atop our anchor.
             self:ClearAllPoints()
-            self:SetPoint(saved.point, UIParent, saved.point, saved.x, saved.y)
+            self:SetPoint(point, UIParent, point, x, y)
             self:SetUserPlaced(true)
         end)
     end)
@@ -1883,10 +1933,7 @@ local EVENT_HANDLERS = {
     -- third-party UI that bypasses our drag handlers.
     PLAYER_LOGOUT                    = function()
         if PVEFrame and PVEFrame:IsUserPlaced() and ApplicantScoutDB then
-            local point, _, _, x, y = PVEFrame:GetPoint()
-            if point then
-                ApplicantScoutDB.pveFramePosition = { point = point, x = x, y = y }
-            end
+            _SavePVEFramePositionFromFrame(PVEFrame)
         end
     end,
     LFG_LIST_APPLICANT_LIST_UPDATED  = function() MarkDirty("listupd") end,
@@ -2470,9 +2517,15 @@ SlashCmdList.APSCOUT = function(msg)
                   and (" (error: " .. lfgDefaultPlaystyleHookError .. ")")
                   or ""))
         if ApplicantScoutDB.pveFramePosition then
-            local pos = ApplicantScoutDB.pveFramePosition
-            print(string.format("  saved position: %s @ (%.0f, %.0f)",
-                  tostring(pos.point), pos.x or 0, pos.y or 0))
+            local point, x, y, ok =
+                _NormalizePVEFramePosition(ApplicantScoutDB.pveFramePosition)
+            if ok then
+                print(string.format("  saved position: %s @ (%.0f, %.0f)",
+                      point, x, y))
+            else
+                _ClearInvalidPVEFramePosition()
+                print("  saved position: (default; invalid saved position cleared)")
+            end
         else
             print("  saved position: (default)")
         end
