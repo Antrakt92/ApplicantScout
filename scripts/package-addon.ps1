@@ -1,5 +1,6 @@
 param(
-    [string]$OutputDir
+    [string]$OutputDir,
+    [switch]$AllowDirty
 )
 
 $ErrorActionPreference = "Stop"
@@ -19,6 +20,7 @@ $RequiredFiles = @(
     "README.md",
     "libs\qrencode.lua"
 )
+$ReleaseInputFiles = $RequiredFiles + @("scripts\package-addon.ps1")
 
 function Invoke-GitChecked {
     param(
@@ -91,6 +93,22 @@ foreach ($RelativePath in $RequiredFiles) {
     Invoke-GitChecked `
         -Arguments @("ls-files", "--error-unmatch", "--", $RelativePath) `
         -ErrorMessage "Required addon package file is not tracked by git: $RelativePath"
+}
+
+if (-not $AllowDirty) {
+    $DirtyEntries = @(
+        & git -C $RepoRoot status --porcelain --untracked-files=no -- $ReleaseInputFiles
+    )
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not inspect package input cleanliness."
+    }
+    if ($DirtyEntries.Count -gt 0) {
+        throw (
+            "Refusing to package from dirty release inputs. Commit or revert " +
+            "these files, or rerun with -AllowDirty for a development smoke build:`n" +
+            ($DirtyEntries -join "`n")
+        )
+    }
 }
 
 New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null

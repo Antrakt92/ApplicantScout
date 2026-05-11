@@ -91,4 +91,6 @@ Build the installable addon ZIP from a clean checkout:
 
 The script emits `dist\ApplicantScout-<version>.zip` using the version in
 `ApplicantScout.toc` and verifies that the archive contains a top-level
-`ApplicantScout\` addon folder.
+`ApplicantScout\` addon folder. It refuses to package dirty release inputs by
+default; use `-AllowDirty` only for local smoke builds that will not be
+published.
