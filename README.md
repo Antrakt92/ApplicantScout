@@ -1,5 +1,15 @@
 # ApplicantScout
 
+> [!IMPORTANT]
+> ApplicantScout is a **two-part tool**. Installing only the WoW addon will not
+> show Warcraft Logs / RaiderIO parses by itself. You need both pieces:
+>
+> 1. **ApplicantScout addon** - installed in WoW through CurseForge or this
+>    release.
+> 2. **Applicant Scout Companion** - the Windows overlay that decodes the
+>    screenshots and shows parses:
+>    [download companion v0.1.0](https://github.com/Antrakt92/ApplicantScout-WoWCompanion/releases/tag/v0.1.0).
+
 ApplicantScout helps Mythic+ key hosts review applicants without turning the
 in-game Group Finder into a spreadsheet. The addon captures applicant snapshots
 from Blizzard's LFG UI, sends them through QR screenshots, and pairs with the
@@ -46,7 +56,7 @@ Scout Companion for the overlay.
 3. Do not use GitHub's automatic source-code ZIP for normal installs; it extracts
    to the wrong folder name for WoW.
 4. Install and start Applicant Scout Companion from
-   `Antrakt92/ApplicantScout-WoWCompanion` GitHub Releases.
+   [the paired companion release](https://github.com/Antrakt92/ApplicantScout-WoWCompanion/releases/tag/v0.1.0).
 5. Reload WoW.
 6. Create your Mythic+ listing as usual and keep ApplicantScout enabled while
    scouting applicants.
