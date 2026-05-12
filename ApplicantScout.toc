@@ -9,7 +9,7 @@
 ## DefaultState: enabled
 ## X-Category: Data Export
 ## X-License: MIT
-## X-Website: https://github.com/Antrakt92/ApplicantScout-Addon-Addon
+## X-Website: https://github.com/Antrakt92/ApplicantScout-Addon
 
 libs\qrencode.lua
 ApplicantScout.lua
