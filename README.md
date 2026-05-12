@@ -8,7 +8,7 @@
 >    release.
 > 2. **Applicant Scout Companion** - the Windows overlay that decodes the
 >    screenshots and shows parses:
->    [download companion v0.1.0](https://github.com/Antrakt92/ApplicantScout-Companion/releases/tag/v0.1.0).
+>    [download the latest companion](https://github.com/Antrakt92/ApplicantScout-Companion/releases/latest).
 
 ApplicantScout helps Mythic+ key hosts review applicants without turning the
 in-game Group Finder into a spreadsheet. The addon captures applicant snapshots
@@ -56,7 +56,7 @@ Scout Companion for the overlay.
 3. Do not use GitHub's automatic source-code ZIP for normal installs; it extracts
    to the wrong folder name for WoW.
 4. Install and start Applicant Scout Companion from
-   [the paired companion release](https://github.com/Antrakt92/ApplicantScout-Companion/releases/tag/v0.1.0).
+   [the paired companion release](https://github.com/Antrakt92/ApplicantScout-Companion/releases/latest).
 5. Reload WoW.
 6. Create your Mythic+ listing as usual and keep ApplicantScout enabled while
    scouting applicants.
