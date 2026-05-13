@@ -8,6 +8,7 @@
 ## OptionalDeps: RaiderIO
 ## DefaultState: enabled
 ## X-Category: Data Export
+## X-Curse-Project-ID: 1541576
 ## X-License: MIT
 ## X-Website: https://github.com/Antrakt92/ApplicantScout-Addon
 
