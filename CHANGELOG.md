@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.2 - 14-May-2026 - Wago publishing
+
+### Added
+
+- Added Wago Addons release metadata and automated Wago upload support.
+
 ## 0.1.1 - 13-May-2026 - CurseForge publishing polish
 
 ### Changed
