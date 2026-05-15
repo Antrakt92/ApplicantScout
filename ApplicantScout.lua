@@ -772,6 +772,7 @@ end
 -- Frames not yet existing (LoD that hasn't loaded) are silently skipped;
 -- next ADDON_LOADED triggers another scan.
 _TryHookInfoPanels = function()
+    local newlyHookedVisible = false
     for _, name in ipairs(INFO_PANEL_FRAMES) do
         if not _hookedInfoPanels[name] then
             local frame = _G[name]
@@ -779,8 +780,14 @@ _TryHookInfoPanels = function()
                 frame:HookScript("OnShow", _RecomputeInteractionSuppression)
                 frame:HookScript("OnHide", _RecomputeInteractionSuppression)
                 _hookedInfoPanels[name] = true
+                if frame.IsShown and frame:IsShown() then
+                    newlyHookedVisible = true
+                end
             end
         end
+    end
+    if newlyHookedVisible then
+        _RecomputeInteractionSuppression()
     end
 end
 
