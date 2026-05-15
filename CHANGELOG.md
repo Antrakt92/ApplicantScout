@@ -1,5 +1,74 @@
 # Changelog
 
+## 0.1.4 - 15-May-2026 - Companion 0.2.2 scoring and update flow
+
+This paired addon + companion release focuses on making Mythic+ fit scoring
+more trustworthy and making companion updates easier to notice and install.
+
+### Changed
+
+- Reworked the companion's Mythic+ fit formula so relevant Warcraft Logs bracket
+  performance is the primary signal.
+- Key level, same-dungeon evidence, profile consistency, and RaiderIO still
+  matter, but they no longer turn weak logs into a good-looking score.
+- Sparse coverage is now treated as weaker evidence instead of a free score
+  bonus.
+- Low-key farm parses no longer inflate scores for much higher hosted keys.
+- Very high-key evidence still helps, but low parses at very high keys are
+  bounded so they do not look better than they should.
+- Fit labels now line up with the visible WCL-style color bands:
+  - `0-49`: `RISK`
+  - `50-69`: `OK`
+  - `70-84`: `FIT`
+  - `85+`: `TOP`
+
+### Improved
+
+- The companion update install action now uses a clearer title-bar download
+  icon.
+- When the companion starts with WoW and finds an installable update, Settings
+  can open with a direct update prompt instead of staying quietly hidden.
+- Self-updates now return the user to the visible companion Settings flow after
+  installing.
+
+### Fixed
+
+- Fixed cases where applicants with all-grey or mostly-grey Mythic+ logs could
+  show as blue or overly positive.
+- Fixed high current or main RaiderIO from rescuing weak WCL evidence into an
+  inflated Mythic+ fit.
+- Fixed poor extra dungeon logs accidentally reducing sparse-evidence penalties.
+- Fixed mixed-bracket cases where old low-key farm logs could distort the fit
+  for the hosted key.
+- Fixed a visual contradiction where a blue-range numeric score could still be
+  labelled `RISK`.
+
+### Previous paired update included
+
+- Added the compact Ko-fi support heart in companion Settings.
+- Added the in-app update install icon that appears only when a valid companion
+  update is available.
+- Added companion version text to Settings and first-run window titles.
+- Refreshed the CurseForge overlay screenshot for the addon page.
+- Defaulted first-run Warcraft Logs data scope to Mythic+ only.
+- Simplified companion Settings: close hides to tray, full quit lives in the
+  tray menu, and secondary actions moved into a cleaner footer/menu layout.
+- Matched Mythic+ parse colors to Warcraft Logs buckets.
+- Split group applicant rows into package fit and individual member fit so
+  group score and player score are no longer visually mixed.
+- Hardened the updater repository target, installer metadata checks, installer
+  error visibility, and duplicate install boundaries.
+- Fixed `Test WCL` status being overwritten by `Saved`.
+- Hardened Warcraft Logs cache, quota handling, stale worker lifecycle, and
+  group scoring edge cases.
+
+### Notes
+
+- No Lua runtime or wire-format changes since `0.1.3`.
+- ApplicantScout remains the in-game data-source half of the setup; the desktop
+  companion renders Warcraft Logs / RaiderIO context.
+- Recommended companion version: `0.2.2` or newer.
+
 ## 0.1.3 - 15-May-2026 - Companion 0.2.0 release train
 
 ### Changed
