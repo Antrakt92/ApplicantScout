@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.1.5 - 15-May-2026 - Companion 0.2.3 lifecycle hardening
+
+This paired addon + companion release tightens the QR screenshot pipeline,
+update install flow, and live-panel suppression behavior.
+
+### Improved
+
+- The in-game addon now recomputes QR suppression immediately after hooking a
+  newly loaded Blizzard info panel that is already visible. First-opening panels
+  such as Encounter Journal, Achievements, Collections, or Settings should no
+  longer leave the QR visible until a later event.
+- The companion now surfaces marker-bearing screenshot decode failures directly
+  in the overlay footer as `shot failed`, with the file path and parse/CRC
+  reason in the tooltip.
+- Companion Settings and tray update actions now share an update-in-progress
+  state, so repeated clicks cannot start duplicate installer/download workers.
+
+### Fixed
+
+- Fixed corrupt ApplicantScout QR screenshots being deleted after a parse
+  failure without any visible companion feedback.
+- Fixed stale screenshot watcher signals after changing the Screenshots folder;
+  old-path snapshots and clears are ignored after a replacement watcher becomes
+  active.
+- Fixed no-system-tray sessions so the companion does not disable
+  last-window-close quitting when no tray control surface exists.
+- Fixed pending overlay geometry saves being lost on tray/control quit paths
+  immediately after moving or resizing the window.
+
+### Notes
+
+- No wire-format changes since `0.1.4`; the companion still supports
+  ApplicantScout payloads through v4.
+- ApplicantScout remains the in-game data-source half of the setup; the desktop
+  companion renders Warcraft Logs / RaiderIO context.
+- Recommended companion version: `0.2.3` or newer.
+
 ## 0.1.4 - 15-May-2026 - Companion 0.2.2 scoring and update flow
 
 This paired addon + companion release focuses on making Mythic+ fit scoring
