@@ -152,7 +152,7 @@ local SafeStr, APSPrint, InitDB, StartSession, EndSession, CheckSessionTransitio
       -- three orthogonal axes: isSessionActive (auto), _qrSuppressedByInteraction
       -- (auto, see below), qrAlwaysVisible (manual debug override).
       _RefreshQRVisibility, _RefreshQRMouse, _RecomputeInteractionSuppression,
-      _TryHookInfoPanels, _OnInteractionEvent,
+      _TryHookInfoPanels, _OnInteractionEvent, _IsQRVisibleForScreenshot,
       -- PVEFrame movement (Phase 2). Forward-decl'd so PLAYER_LOGIN handler
       -- and _AttachSettingsPanel's ADDON_LOADED watcher can both reference it
       -- before the body is defined further down.
@@ -174,10 +174,13 @@ local SafeStr, APSPrint, InitDB, StartSession, EndSession, CheckSessionTransitio
 -- character, map, etc.) is open. Hides QR so user can read those windows
 -- without the QR overlay obscuring text. Companion misses ~10-30s of emits
 -- while user has interaction window open — acceptable per scope.
+-- qrForceVisibleForShot is a transport-only visibility lease for force shots
+-- such as EndSession's final clear while an interaction frame has hidden QR.
 local lastSnapshotHash, lastShotTime, pendingShotDirty,
       qrAlwaysVisible, qrMoveMode, suppressShotsUntil,
-      _qrSuppressedByInteraction, lastQREncodeMode,
-      lastQREncodeBytes, lastQREncodeError
+      _qrSuppressedByInteraction, qrForceVisibleForShot,
+      qrForceVisibleShotGen, lastQREncodeMode, lastQREncodeBytes,
+      lastQREncodeError
 
 -- Settings panel state. settingsFrame = parent of all widgets; created lazily
 -- in _AttachSettingsPanel. settingsFrameAttached = one-shot init guard.
@@ -716,6 +719,7 @@ _RefreshQRVisibility = function()
     local shouldShow = (isSessionActive and not _qrSuppressedByInteraction)
                        or qrAlwaysVisible
                        or qrMoveMode
+                       or qrForceVisibleForShot
     if shouldShow and not wasShown then
         qrFrame:SetAlpha(1)
         qrFrame:Show()
@@ -729,6 +733,10 @@ _RefreshQRVisibility = function()
     elseif not shouldShow and wasShown then
         qrFrame:Hide()
     end
+end
+
+_IsQRVisibleForScreenshot = function()
+    return qrFrame and qrFrame:IsShown()
 end
 
 -- Aggregator: walks events table + info-panel hooks to determine if any
@@ -1724,6 +1732,8 @@ pendingShotDirty = false
 lastQREncodeMode = "never"
 lastQREncodeBytes = 0
 lastQREncodeError = nil
+qrForceVisibleForShot = false
+qrForceVisibleShotGen = 0
 local SHOT_THROTTLE_S = 0.5
 
 -- Build payload, dedup vs last hash, throttle, paint QR, trigger Screenshot.
@@ -1765,6 +1775,25 @@ MaybeTriggerScreenshot = function(force, entryHint)
     if not force and suppressShotsUntil and GetTime() < suppressShotsUntil then
         pendingShotDirty = true
         return
+    end
+
+    -- Interaction-hidden QR should not produce or dedupe a payload. Keep the
+    -- latest state pending and let the scan ticker emit once _RefreshQRVisibility
+    -- shows the frame again; force shots still bypass for EndSession cleanup and
+    -- explicit support commands.
+    if not force and not _IsQRVisibleForScreenshot() then
+        pendingShotDirty = true
+        return
+    end
+
+    local forceVisibleShotDelay = 0
+    local forceVisibleShotGen = nil
+    if force and not _IsQRVisibleForScreenshot() then
+        qrForceVisibleForShot = true
+        qrForceVisibleShotGen = (qrForceVisibleShotGen or 0) + 1
+        forceVisibleShotGen = qrForceVisibleShotGen
+        _RefreshQRVisibility()
+        forceVisibleShotDelay = QR_RENDER_SETTLE_S
     end
 
     local entry = nil
@@ -1824,12 +1853,20 @@ MaybeTriggerScreenshot = function(force, entryHint)
     -- pooled textures takes effect on the next render pass, not the current
     -- one). No alpha dance — that empirically races Screenshot() and
     -- captures alpha=0 → no APS1 marker on JPG.
-    C_Timer.After(0, function()
+    C_Timer.After(forceVisibleShotDelay, function()
         if ApplicantScoutDB and ApplicantScoutDB.debug then
             print(string.format("|cff999999[APS-debug]|r CAP qr_size=%dpx hash=%x t=%.2f",
                   qrCurrentSize, h, GetTime()))
         end
         Screenshot()
+        if forceVisibleShotGen then
+            C_Timer.After(0.05, function()
+                if qrForceVisibleShotGen == forceVisibleShotGen then
+                    qrForceVisibleForShot = false
+                    _RefreshQRVisibility()
+                end
+            end)
+        end
     end)
 
     if ApplicantScoutDB and ApplicantScoutDB.debug then
@@ -2495,6 +2532,7 @@ SlashCmdList.APSCOUT = function(msg)
             print("  QR frame position: " .. _CurrentQRPositionText())
             print("  QR mouse enabled: " .. tostring(qrMoveMode and true or false))
         end
+        print("  QR force-visible shot lease: " .. tostring(qrForceVisibleForShot or false))
         print("  texture pool: " .. #qrTexturePool .. " (used last paint: " .. qrTextureUsed .. ")")
         print("  last snapshot hash: " .. tostring(lastSnapshotHash))
         print("  last shot time: " .. (lastShotTime > 0
