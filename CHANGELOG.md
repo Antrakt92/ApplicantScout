@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.1.6 - 16-May-2026 - Companion 0.2.4 live Mythic+ hardening
+
+This paired addon + companion release improves live Mythic+ key detection,
+Warcraft Logs retry behavior, and fallback applicant sorting during active
+group listings.
+
+### Improved
+
+- The addon now uses the hosted owned-keystone activity and level when Blizzard
+  exposes the active listing as generic `Mythic+`, so the companion can receive
+  the real hosted key level instead of `+0`.
+- `/apscout status` now prints the active listing quest ID, resolved activity
+  name, owned-keystone activity/level, whether that fallback is being used, and
+  the final derived key level.
+- The companion now keeps sorting generic Mythic+ listings by visible M+ log
+  evidence, with higher completed key levels ahead of low-key percentile spikes.
+- Temporary Warcraft Logs server errors and read timeouts are now retryable, so
+  applicants are less likely to stay stuck as `?` after transient WCL failures.
+
+### Fixed
+
+- Fixed hosted Mythic+ listings sometimes being treated as unknown `+0` keys
+  when the Blizzard active-entry payload did not expose the concrete key level.
+- Fixed WCL HTTP 5xx responses and network timeouts sometimes behaving like
+  permanent applicant failures.
+
+### Notes
+
+- No wire-format changes since `0.1.4`; the companion still supports
+  ApplicantScout payloads through v4.
+- ApplicantScout remains the in-game data-source half of the setup; the desktop
+  companion renders Warcraft Logs / RaiderIO context.
+- Recommended companion version: `0.2.4` or newer.
+
 ## 0.1.5 - 15-May-2026 - Companion 0.2.3 lifecycle hardening
 
 This paired addon + companion release tightens the QR screenshot pipeline,

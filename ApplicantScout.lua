@@ -1190,13 +1190,57 @@ local function _ExtractKeystoneLevelFromText(value)
     return _NormalizeKeystoneLevel(m)
 end
 
-local function _GetListingKeystoneLevel(activityID, listingName, listingComment)
+local function _GetActivityInfoForListing(activityID, questID)
+    if not (C_LFGList and C_LFGList.GetActivityInfoTable) then return nil end
+    activityID = math.floor(SafeNumber(activityID, 0))
+    if activityID <= 0 then return nil end
+    questID = math.floor(SafeNumber(questID, 0))
+    if questID > 0 then
+        local info = SafeTable(C_LFGList.GetActivityInfoTable(activityID, questID))
+        if info then return info end
+    end
+    return SafeTable(C_LFGList.GetActivityInfoTable(activityID))
+end
+
+local function _ActivityInfoListingName(activityInfo)
+    activityInfo = SafeTable(activityInfo)
+    if not activityInfo then return "?" end
+    local shortName = SafeStr(activityInfo.shortName, "?")
+    if shortName ~= "" and shortName ~= "?" then
+        return shortName
+    end
+    local fullName = SafeStr(activityInfo.fullName, "?")
+    return (fullName ~= "" and fullName) or "?"
+end
+
+local function _GetOwnedKeystoneListingInfo()
+    if not (C_LFGList and C_LFGList.GetOwnedKeystoneActivityAndGroupAndLevel) then
+        return 0, 0, 0, nil
+    end
+    local ok, ownedActivityID, ownedGroupID, ownedLevel = pcall(
+        C_LFGList.GetOwnedKeystoneActivityAndGroupAndLevel
+    )
+    if not ok then return 0, 0, 0, nil end
+    ownedActivityID = math.floor(SafeNumber(ownedActivityID, 0))
+    ownedGroupID = math.floor(SafeNumber(ownedGroupID, 0))
+    ownedLevel = _NormalizeKeystoneLevel(ownedLevel)
+    local ownedInfo = nil
+    if ownedActivityID > 0 then
+        ownedInfo = _GetActivityInfoForListing(ownedActivityID, 0)
+    end
+    return ownedActivityID, ownedGroupID, ownedLevel, ownedInfo
+end
+
+local function _GetListingKeystoneLevel(activityID, listingName, listingComment, ownedLevel)
     -- C_LFGList.GetKeystoneForActivity is the listing-level source. Text
     -- parsing stays as fallback because some custom titles/comments include
     -- "+N", while Blizzard's active-entry name often does not.
     local keyLevel = 0
     if C_LFGList and C_LFGList.GetKeystoneForActivity and activityID > 0 then
         keyLevel = _NormalizeKeystoneLevel(C_LFGList.GetKeystoneForActivity(activityID))
+    end
+    if keyLevel == 0 then
+        keyLevel = _NormalizeKeystoneLevel(ownedLevel)
     end
     if keyLevel == 0 then
         keyLevel = _ExtractKeystoneLevelFromText(listingName)
@@ -1281,22 +1325,16 @@ local function BuildPayload(entry, applicantIDs)
         activityID = math.floor(activityID)
         if activityID < 0 then activityID = 0 end
 
-        local activityInfo = nil
-        if activityID > 0 then
-            activityInfo = SafeTable(C_LFGList.GetActivityInfoTable(activityID))
-        end
+        local questID = math.floor(SafeNumber(cleanEntry.questID, 0))
+        if questID < 0 then questID = 0 end
+
+        local activityInfo = _GetActivityInfoForListing(activityID, questID)
 
         local dungeonName = "?"
         local categoryID = 0
         local difficultyID = 0
         if activityInfo then
-            local shortName = SafeStr(activityInfo.shortName, "?")
-            if shortName ~= "" and shortName ~= "?" then
-                dungeonName = shortName
-            else
-                local fullName = SafeStr(activityInfo.fullName, "?")
-                dungeonName = (fullName ~= "" and fullName) or "?"
-            end
+            dungeonName = _ActivityInfoListingName(activityInfo)
             categoryID = math.floor(SafeNumber(activityInfo.categoryID, 0))
             difficultyID = math.floor(SafeNumber(activityInfo.difficultyID, 0))
         end
@@ -1309,7 +1347,27 @@ local function BuildPayload(entry, applicantIDs)
 
         local keyLevel = 0
         if isMythicPlus then
-            keyLevel = _GetListingKeystoneLevel(activityID, listingName, listingComment)
+            local ownedActivityID, _ownedGroupID, ownedLevel, ownedInfo =
+                _GetOwnedKeystoneListingInfo()
+            local shouldUseOwnedKeystone = ownedLevel > 0
+                and ownedActivityID > 0
+                and ownedInfo
+                and (ownedActivityID == activityID
+                    or dungeonName == "Mythic+"
+                    or dungeonName == "?")
+            if shouldUseOwnedKeystone then
+                activityID = ownedActivityID
+                activityInfo = ownedInfo
+                dungeonName = _ActivityInfoListingName(activityInfo)
+                categoryID = math.floor(SafeNumber(activityInfo.categoryID, categoryID))
+                difficultyID = math.floor(SafeNumber(activityInfo.difficultyID, difficultyID))
+            end
+            keyLevel = _GetListingKeystoneLevel(
+                activityID,
+                listingName,
+                listingComment,
+                shouldUseOwnedKeystone and ownedLevel or 0
+            )
         end
 
         table.insert(out, string.char(1))
@@ -2461,13 +2519,18 @@ SlashCmdList.APSCOUT = function(msg)
             if cleanActivityID <= 0 then
                 cleanActivityID = math.floor(SafeNumber(entry.activityID, 0))
             end
+            local cleanQuestID = math.floor(SafeNumber(entry.questID, 0))
+            local statusActivityInfo =
+                _GetActivityInfoForListing(cleanActivityID, cleanQuestID)
+            local statusDungeonName = _ActivityInfoListingName(statusActivityInfo)
             print("  entry.activityIDs[1]: " .. SafeDiag(activityIDs and activityIDs[1]))
             print("  entry.activityID: " .. SafeDiag(entry.activityID))
+            print("  entry.questID: " .. SafeDiag(entry.questID))
             if cleanActivityID > 0 then
-                local activityInfo = SafeTable(C_LFGList.GetActivityInfoTable(cleanActivityID))
-                if activityInfo then
-                    print("  activity.categoryID: " .. SafeDiag(activityInfo.categoryID))
-                    print("  activity.difficultyID: " .. SafeDiag(activityInfo.difficultyID))
+                if statusActivityInfo then
+                    print("  activity.name: " .. statusDungeonName)
+                    print("  activity.categoryID: " .. SafeDiag(statusActivityInfo.categoryID))
+                    print("  activity.difficultyID: " .. SafeDiag(statusActivityInfo.difficultyID))
                 end
                 if C_LFGList.GetKeystoneForActivity then
                     print("  activity.keystoneLevel: "
@@ -2480,9 +2543,25 @@ SlashCmdList.APSCOUT = function(msg)
             print("  entry.comment: " .. SafeDiag(entry.comment))
             local statusListingName = SafeStr(entry.name, "?"):gsub("|K[^|]*|k", "")
             local statusListingComment = SafeStr(entry.comment, "?")
+            local ownedActivityID, ownedGroupID, ownedLevel, ownedInfo =
+                _GetOwnedKeystoneListingInfo()
+            print("  ownedKeystone.activityID: " .. tostring(ownedActivityID))
+            print("  ownedKeystone.groupID: " .. tostring(ownedGroupID))
+            print("  ownedKeystone.level: " .. tostring(ownedLevel))
+            print("  ownedKeystone.activityName: " .. _ActivityInfoListingName(ownedInfo))
+            local statusUseOwned = ownedLevel > 0
+                and ownedActivityID > 0
+                and ownedInfo
+                and (ownedActivityID == cleanActivityID
+                    or statusDungeonName == "Mythic+"
+                    or statusDungeonName == "?")
+            print("  ownedKeystone.usedForListing: " .. tostring(statusUseOwned))
             print("  derived keyLevel: "
                   .. tostring(_GetListingKeystoneLevel(
-                      cleanActivityID, statusListingName, statusListingComment)))
+                      statusUseOwned and ownedActivityID or cleanActivityID,
+                      statusListingName,
+                      statusListingComment,
+                      statusUseOwned and ownedLevel or 0)))
         else
             print("  entry: nil")
         end
