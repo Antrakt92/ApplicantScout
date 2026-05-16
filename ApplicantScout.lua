@@ -1302,29 +1302,7 @@ local function _EmptyRaiderIOMPlusSummary(mainScore)
         timedAtOrAboveMinus2 = 0,
         completedAtOrAboveMinus1 = 0,
         dungeonCount = 0,
-        dungeons = {},
     }
-end
-
-local function _RaiderIODungeonName(dungeon)
-    dungeon = SafeTable(dungeon)
-    if not dungeon then return "" end
-    local name = SafeStr(dungeon.name, "")
-    if name ~= "" then return name end
-    return SafeStr(dungeon.shortName, "")
-end
-
-local function _AddTimedRaiderIODungeon(summary, dungeonName, keyLevel)
-    dungeonName = SafeStr(dungeonName, "")
-    keyLevel = _NormalizeKeystoneLevel(keyLevel)
-    if dungeonName == "" or keyLevel <= 0 then return end
-    for _, row in ipairs(summary.dungeons) do
-        if row.name == dungeonName then
-            if keyLevel > row.keyLevel then row.keyLevel = keyLevel end
-            return
-        end
-    end
-    table.insert(summary.dungeons, { name = dungeonName, keyLevel = keyLevel })
 end
 
 local function _RaiderIOProfileLookupName(memberName)
@@ -1409,20 +1387,10 @@ local function _GetRaiderIOMPlusSummary(memberName, listingActivityID, targetKey
                     summary.timedAtOrAboveMinus2 =
                         summary.timedAtOrAboveMinus2 + 1
                 end
-                if timed then
-                    _AddTimedRaiderIODungeon(
-                        summary,
-                        _RaiderIODungeonName(dungeon),
-                        keyLevel
-                    )
-                end
             end
         end
     end
 
-    table.sort(summary.dungeons, function(a, b)
-        return SafeStr(a and a.name, "") < SafeStr(b and b.name, "")
-    end)
     summary.bestKey = _ClampUInt8(summary.bestKey)
     summary.bestDungeonKey = _ClampUInt8(summary.bestDungeonKey)
     summary.timedAtOrAbove = _ClampUInt8(summary.timedAtOrAbove)
@@ -1432,30 +1400,6 @@ local function _GetRaiderIOMPlusSummary(memberName, listingActivityID, targetKey
         _ClampUInt8(summary.completedAtOrAboveMinus1)
     summary.dungeonCount = _ClampUInt8(summary.dungeonCount)
     return summary
-end
-
-local function _PackRaiderIODungeonRows(out, rows)
-    rows = SafeTable(rows)
-    local chunks = {}
-    local count = 0
-    if rows then
-        for _, row in ipairs(rows) do
-            row = SafeTable(row)
-            if row and count < 16 then
-                local keyLevel = _NormalizeKeystoneLevel(row.keyLevel)
-                local name = SafeStr(row.name, "")
-                if keyLevel > 0 and name ~= "" then
-                    table.insert(chunks, string.char(_ClampUInt8(keyLevel)))
-                    _PackLenStr(chunks, name)
-                    count = count + 1
-                end
-            end
-        end
-    end
-    table.insert(out, string.char(count))
-    for _, chunk in ipairs(chunks) do
-        table.insert(out, chunk)
-    end
 end
 
 -- CRC32 IEEE-802.3, table-based. Built once at file load (~5KB memory).
@@ -1489,7 +1433,7 @@ local function BuildPayload(entry, applicantIDs)
 
     -- Header (length patched after we know body size)
     table.insert(out, "APS1")
-    table.insert(out, string.char(0x06))    -- protocol version (v6: RaiderIO dungeon rows)
+    table.insert(out, string.char(0x05))    -- protocol version (v5: compact RaiderIO summary)
     table.insert(out, "\0\0")                -- length placeholder (uint16 BE)
     table.insert(out, "\0\0")                -- reserved
 
@@ -1618,15 +1562,13 @@ local function BuildPayload(entry, applicantIDs)
     --       member-load lag (rare; members 2+ may lag by ≤1 frame on first
     --       list-update). We just skip the block; next snapshot ≤0.5s later
     --       picks them up.
-    -- Per-block byte layout (v6):
+    -- Per-block byte layout (v5):
     --   uint32 applicant_id, u8 member_idx (1-based), u8 class_id,
     --   u16 spec_id, u16 ilvl, u16 score, u16 main_score,
     --   u8 rio_profile, u8 rio_best_key, u8 rio_best_dungeon_key,
     --   u8 rio_timed_at_or_above, u8 rio_timed_at_or_above_minus1,
     --   u8 rio_timed_at_or_above_minus2, u8 rio_completed_at_or_above_minus1,
-    --   u8 rio_dungeon_count, u8 rio_row_count,
-    --   repeated {u8 rio_key_level, len-prefixed rio_dungeon_name},
-    --   u8 role, len-prefixed name.
+    --   u8 rio_dungeon_count, u8 role, len-prefixed name.
     local memberOut = {}
     local emittedCount = 0
     for _, app in ipairs(validApps) do
@@ -1657,7 +1599,6 @@ local function BuildPayload(entry, applicantIDs)
                 table.insert(memberOut, string.char(rioSummary.timedAtOrAboveMinus2))
                 table.insert(memberOut, string.char(rioSummary.completedAtOrAboveMinus1))
                 table.insert(memberOut, string.char(rioSummary.dungeonCount))
-                _PackRaiderIODungeonRows(memberOut, rioSummary.dungeons)
                 table.insert(memberOut, string.char(ROLE_NAME_TO_BYTE[roleToken] or 2))
                 _PackLenStr(memberOut, memberName)
                 emittedCount = emittedCount + 1
