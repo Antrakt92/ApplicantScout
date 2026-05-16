@@ -2702,7 +2702,8 @@ SlashCmdList.APSCOUT = function(msg)
             APSPrint("shotnow skipped — enable ApplicantScout first")
             return
         end
-        MaybeTriggerScreenshot(true)
+        local entry = CheckSessionTransition()
+        MaybeTriggerScreenshot(true, entry)
         APSPrint("forced snapshot — check Screenshots/ folder")
     elseif msg == "qrvisible" then
         -- Toggle debug-visible override. _RefreshQRVisibility resolves all four

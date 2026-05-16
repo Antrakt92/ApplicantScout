@@ -93,7 +93,21 @@ def test_shotnow_is_gated_when_addon_is_disabled():
     )
 
     disabled_guard_idx = body.index("not (ApplicantScoutDB and ApplicantScoutDB.enabled)")
-    screenshot_idx = body.index("MaybeTriggerScreenshot(true)")
+    screenshot_idx = body.index("MaybeTriggerScreenshot(true")
 
     assert disabled_guard_idx < screenshot_idx
     assert "return" in body[disabled_guard_idx:screenshot_idx]
+
+
+def test_shotnow_refreshes_session_before_forced_snapshot():
+    source = _lua_source()
+    body = _slice_between(
+        source,
+        'elseif msg == "shotnow" then',
+        'elseif msg == "qrvisible" then',
+    )
+
+    transition_idx = body.index("CheckSessionTransition()")
+    screenshot_idx = body.index("MaybeTriggerScreenshot(true")
+
+    assert transition_idx < screenshot_idx
