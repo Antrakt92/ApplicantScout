@@ -139,7 +139,7 @@ def test_shotnow_refreshes_session_before_forced_snapshot():
     assert transition_idx < screenshot_idx
 
 
-def test_payload_uses_wire_v5_with_raiderio_completion_summary():
+def test_payload_still_includes_raiderio_completion_summary():
     source = _lua_source()
     payload_body = _slice_between(
         source,
@@ -147,11 +147,24 @@ def test_payload_uses_wire_v5_with_raiderio_completion_summary():
         "local function HashSnapshot(payload)",
     )
 
-    assert "string.char(0x05)" in payload_body
-    assert "v5: RaiderIO completion summary" in payload_body
+    assert "string.char(0x06)" in payload_body
     assert "_GetRaiderIOMPlusSummary(" in source
     assert "rioSummary.hasProfile" in payload_body
     assert "rioSummary.bestDungeonKey" in payload_body
+
+
+def test_payload_uses_wire_v6_with_raiderio_dungeon_rows():
+    source = _lua_source()
+    payload_body = _slice_between(
+        source,
+        "local function BuildPayload(entry, applicantIDs)",
+        "local function HashSnapshot(payload)",
+    )
+
+    assert "string.char(0x06)" in payload_body
+    assert "v6: RaiderIO dungeon rows" in payload_body
+    assert "rioSummary.dungeons" in payload_body
+    assert "_PackRaiderIODungeonRows(memberOut, rioSummary.dungeons)" in payload_body
 
 
 def test_raiderio_summary_reuses_one_profile_lookup_per_member():

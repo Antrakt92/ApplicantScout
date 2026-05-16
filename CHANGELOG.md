@@ -1,16 +1,19 @@
 # Changelog
 
-## 0.2.0 - 16-May-2026 - Companion 0.3.0 RaiderIO completion scoring
+## 0.2.0 - 16-May-2026 - Companion 0.3.0 RaiderIO completion and dungeon keys
 
-This paired addon + companion release adds RaiderIO per-dungeon completion
-signals to the QR payload so the companion can judge real near-key experience
-alongside Warcraft Logs parses.
+This paired addon + companion release adds RaiderIO per-dungeon completion and
+timed-key signals to the QR payload so the companion can judge real near-key
+experience alongside Warcraft Logs parses.
 
 ### Improved
 
 - ApplicantScout payloads now include a compact RaiderIO completion summary for
   the hosted key: best completed key, best key for the listed dungeon, timed
   coverage around the target level, and completed coverage one level below.
+- ApplicantScout payloads now also include each applicant's highest timed
+  RaiderIO key per dungeon, allowing the companion to display RIO dungeon
+  evidence beside Warcraft Logs key/percentile rows.
 - Forced QR snapshots now refresh the active LFG session immediately before
   building the payload, so `/apscout shotnow` and cleanup shots use the latest
   Blizzard listing state.
@@ -30,8 +33,8 @@ alongside Warcraft Logs parses.
 
 ### Notes
 
-- Wire payload v5 is new in this release. The paired companion supports older
-  payloads through v5.
+- Wire payload v6 is new in this release. The paired companion supports older
+  payloads through v6.
 - ApplicantScout remains the in-game data-source half of the setup; the desktop
   companion renders Warcraft Logs / RaiderIO context.
 - Recommended companion version: `0.3.0` or newer.
