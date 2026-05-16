@@ -19,6 +19,8 @@ experience alongside Warcraft Logs parses.
 - The paired companion now uses localized LFG activity IDs and RaiderIO
   per-dungeon rows for same-dungeon fit, so localized clients can keep RIO and
   WCL evidence aligned.
+- The paired companion now separates Warcraft Logs key level and percentile in
+  hover details, so RaiderIO and WCL evidence is easier to scan during invites.
 - Forced QR snapshots now refresh the active LFG session immediately before
   building the payload, so `/apscout shotnow` and cleanup shots use the latest
   Blizzard listing state.
