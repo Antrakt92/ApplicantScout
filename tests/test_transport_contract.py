@@ -137,3 +137,36 @@ def test_shotnow_refreshes_session_before_forced_snapshot():
     screenshot_idx = body.index("MaybeTriggerScreenshot(true")
 
     assert transition_idx < screenshot_idx
+
+
+def test_payload_uses_wire_v5_with_raiderio_completion_summary():
+    source = _lua_source()
+    payload_body = _slice_between(
+        source,
+        "local function BuildPayload(entry, applicantIDs)",
+        "local function HashSnapshot(payload)",
+    )
+
+    assert "string.char(0x05)" in payload_body
+    assert "v5: RaiderIO completion summary" in payload_body
+    assert "_GetRaiderIOMPlusSummary(" in source
+    assert "rioSummary.hasProfile" in payload_body
+    assert "rioSummary.bestDungeonKey" in payload_body
+
+
+def test_raiderio_summary_reuses_one_profile_lookup_per_member():
+    source = _lua_source()
+    summary_body = _slice_between(
+        source,
+        "local function _GetRaiderIOMPlusSummary(memberName, listingActivityID, targetKey)",
+        "-- CRC32 IEEE-802.3",
+    )
+    payload_body = _slice_between(
+        source,
+        "local function BuildPayload(entry, applicantIDs)",
+        "local function HashSnapshot(payload)",
+    )
+
+    assert summary_body.count("pcall(rio.GetProfile") == 1
+    assert payload_body.count("_GetRaiderIOMPlusSummary(") == 1
+    assert "_RaiderIODungeonMatchesActivity" in summary_body

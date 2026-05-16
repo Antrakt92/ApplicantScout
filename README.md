@@ -37,7 +37,8 @@ and key-fit context.
 - World of Warcraft Retail / Midnight 12.x.
 - Applicant Scout Companion for the external overlay.
 - Warcraft Logs API credentials configured in the companion.
-- Optional: RaiderIO addon for current-season main-score context.
+- Optional: RaiderIO addon for current-season main-score and per-dungeon
+  completed-key context.
 
 ## Installation
 
@@ -107,7 +108,7 @@ Windows user profile.
 - WoW Retail Midnight: Interface `120005, 120007`
 - Latest ApplicantScout addon release
 - Latest Applicant Scout Companion release
-- Wire payload: v4, including optional RaiderIO main-score data
+- Wire payload: v5, including optional RaiderIO main-score and completion data
 - Classic-era clients are not supported
 
 ## Troubleshooting

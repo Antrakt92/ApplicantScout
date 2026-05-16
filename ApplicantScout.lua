@@ -1072,7 +1072,11 @@ end
 --              region_id byte + len-prefixed playerName
 --   Apps:      uint16 count; per applicant: uint32 id + uint8 member_idx +
 --              uint8 classID + uint16 specID + uint16 ilvl + uint16 score +
---              uint16 mainScore + uint8 role + uint8 nameLen + utf8 name
+--              uint16 mainScore + uint8 rioProfile + uint8 rioBestKey +
+--              uint8 rioBestDungeonKey + uint8 rioTimedAtTarget +
+--              uint8 rioTimedAtMinus1 + uint8 rioTimedAtMinus2 +
+--              uint8 rioCompletedAtMinus1 + uint8 rioDungeonCount +
+--              uint8 role + uint8 nameLen + utf8 name
 --              (CLAMPED to 255 bytes)
 --   Trailer:   uint32 CRC32 (IEEE 802.3) over [magic..last applicant byte]
 --
@@ -1131,6 +1135,13 @@ local function _ClampUInt16(n)
     n = math.floor(SafeNumber(n, 0))
     if n < 0 then return 0 end
     if n > 65535 then return 65535 end
+    return n
+end
+
+local function _ClampUInt8(n)
+    n = math.floor(SafeNumber(n, 0))
+    if n < 0 then return 0 end
+    if n > 255 then return 255 end
     return n
 end
 
@@ -1261,29 +1272,119 @@ local function _GetListingKeystoneLevel(activityID, listingName, listingComment,
     return keyLevel
 end
 
-local function _GetRaiderIOMainScore(memberName)
+local function _RaiderIODungeonMatchesActivity(dungeon, listingActivityID)
+    dungeon = SafeTable(dungeon)
+    listingActivityID = math.floor(SafeNumber(listingActivityID, 0))
+    if not dungeon or listingActivityID <= 0 then return false end
+
+    local lfdActivityIDs = SafeTable(dungeon.lfd_activity_ids)
+    if lfdActivityIDs then
+        for _, rawActivityID in ipairs(lfdActivityIDs) do
+            if math.floor(SafeNumber(rawActivityID, 0)) == listingActivityID then
+                return true
+            end
+        end
+    end
+
+    return math.floor(SafeNumber(dungeon.keystone_instance, 0)) == listingActivityID
+end
+
+local function _EmptyRaiderIOMPlusSummary(mainScore)
+    return {
+        mainScore = _ClampUInt16(mainScore),
+        hasProfile = false,
+        bestKey = 0,
+        bestDungeonKey = 0,
+        timedAtOrAbove = 0,
+        timedAtOrAboveMinus1 = 0,
+        timedAtOrAboveMinus2 = 0,
+        completedAtOrAboveMinus1 = 0,
+        dungeonCount = 0,
+    }
+end
+
+local function _GetRaiderIOMPlusSummary(memberName, listingActivityID, targetKey)
     -- RaiderIO is optional. Query only with the SafeStr-cleaned applicant name:
     -- the raw LFG name can be secret-tagged, and RaiderIO's public API performs
     -- string parsing internally.
-    if memberName == "" or memberName == "?" then return 0 end
+    if memberName == "" or memberName == "?" then
+        return _EmptyRaiderIOMPlusSummary(0)
+    end
     local rio = SafeTable(_G.RaiderIO)
-    if not rio or type(rio.GetProfile) ~= "function" then return 0 end
+    if not rio or type(rio.GetProfile) ~= "function" then
+        return _EmptyRaiderIOMPlusSummary(0)
+    end
 
     local ok, profile = pcall(rio.GetProfile, memberName)
-    if not ok then return 0 end
+    if not ok then return _EmptyRaiderIOMPlusSummary(0) end
     profile = SafeTable(profile)
-    if not profile then return 0 end
+    if not profile then return _EmptyRaiderIOMPlusSummary(0) end
 
     local keystoneProfile = SafeTable(profile.mythicKeystoneProfile)
-    if not keystoneProfile then return 0 end
-    if IsSecretValue(keystoneProfile.blocked) or keystoneProfile.blocked then return 0 end
+    if not keystoneProfile then return _EmptyRaiderIOMPlusSummary(0) end
+    if IsSecretValue(keystoneProfile.blocked) or keystoneProfile.blocked then
+        return _EmptyRaiderIOMPlusSummary(0)
+    end
 
     local mainCurrent = SafeTable(keystoneProfile.mplusMainCurrent)
     local mainScore = keystoneProfile.mainCurrentScore
     if mainCurrent then
         mainScore = mainCurrent.score
     end
-    return _ClampUInt16(mainScore)
+    local summary = _EmptyRaiderIOMPlusSummary(mainScore)
+
+    local sortedDungeons = SafeTable(keystoneProfile.sortedDungeons)
+    if not sortedDungeons then return summary end
+
+    targetKey = _NormalizeKeystoneLevel(targetKey)
+    local targetMinus1 = targetKey > 0 and math.max(2, targetKey - 1) or 0
+    local targetMinus2 = targetKey > 0 and math.max(2, targetKey - 2) or 0
+    summary.hasProfile = true
+
+    for _, sortedDungeon in ipairs(sortedDungeons) do
+        local entry = SafeTable(sortedDungeon)
+        if entry then
+            local keyLevel = _NormalizeKeystoneLevel(entry.level)
+            if keyLevel > 0 then
+                local chests = math.floor(SafeNumber(entry.chests, 0))
+                local timed = chests > 0
+                local dungeon = SafeTable(entry.dungeon)
+                summary.dungeonCount = summary.dungeonCount + 1
+                if keyLevel > summary.bestKey then summary.bestKey = keyLevel end
+                if _RaiderIODungeonMatchesActivity(dungeon, listingActivityID)
+                   and keyLevel > summary.bestDungeonKey then
+                    summary.bestDungeonKey = keyLevel
+                end
+                if targetKey > 0 and timed and keyLevel >= targetKey then
+                    summary.timedAtOrAbove = summary.timedAtOrAbove + 1
+                end
+                if targetMinus1 > 0 then
+                    if timed and keyLevel >= targetMinus1 then
+                        summary.timedAtOrAboveMinus1 =
+                            summary.timedAtOrAboveMinus1 + 1
+                    end
+                    if keyLevel >= targetMinus1 then
+                        summary.completedAtOrAboveMinus1 =
+                            summary.completedAtOrAboveMinus1 + 1
+                    end
+                end
+                if targetMinus2 > 0 and timed and keyLevel >= targetMinus2 then
+                    summary.timedAtOrAboveMinus2 =
+                        summary.timedAtOrAboveMinus2 + 1
+                end
+            end
+        end
+    end
+
+    summary.bestKey = _ClampUInt8(summary.bestKey)
+    summary.bestDungeonKey = _ClampUInt8(summary.bestDungeonKey)
+    summary.timedAtOrAbove = _ClampUInt8(summary.timedAtOrAbove)
+    summary.timedAtOrAboveMinus1 = _ClampUInt8(summary.timedAtOrAboveMinus1)
+    summary.timedAtOrAboveMinus2 = _ClampUInt8(summary.timedAtOrAboveMinus2)
+    summary.completedAtOrAboveMinus1 =
+        _ClampUInt8(summary.completedAtOrAboveMinus1)
+    summary.dungeonCount = _ClampUInt8(summary.dungeonCount)
+    return summary
 end
 
 -- CRC32 IEEE-802.3, table-based. Built once at file load (~5KB memory).
@@ -1317,12 +1418,14 @@ local function BuildPayload(entry, applicantIDs)
 
     -- Header (length patched after we know body size)
     table.insert(out, "APS1")
-    table.insert(out, string.char(0x04))    -- protocol version (v4: RaiderIO main score)
+    table.insert(out, string.char(0x05))    -- protocol version (v5: RaiderIO completion summary)
     table.insert(out, "\0\0")                -- length placeholder (uint16 BE)
     table.insert(out, "\0\0")                -- reserved
 
     -- Listing block
     local cleanEntry = SafeTable(entry)
+    local listingActivityIDForRio = 0
+    local listingKeyLevelForRio = 0
     if cleanEntry then
         -- Midnight 12.0 returns activityIDs (table) on the primary listing —
         -- legacy entry.activityID is nil. Fall back to legacy field for
@@ -1379,6 +1482,8 @@ local function BuildPayload(entry, applicantIDs)
                 shouldUseOwnedKeystone and ownedLevel or 0
             )
         end
+        listingActivityIDForRio = activityID
+        listingKeyLevelForRio = keyLevel
 
         table.insert(out, string.char(1))
         table.insert(out, _Uint32BE(activityID))
@@ -1442,10 +1547,13 @@ local function BuildPayload(entry, applicantIDs)
     --       member-load lag (rare; members 2+ may lag by ≤1 frame on first
     --       list-update). We just skip the block; next snapshot ≤0.5s later
     --       picks them up.
-    -- Per-block byte layout (v4):
+    -- Per-block byte layout (v5):
     --   uint32 applicant_id, u8 member_idx (1-based), u8 class_id,
-    --   u16 spec_id, u16 ilvl, u16 score, u16 main_score, u8 role,
-    --   len-prefixed name.
+    --   u16 spec_id, u16 ilvl, u16 score, u16 main_score,
+    --   u8 rio_profile, u8 rio_best_key, u8 rio_best_dungeon_key,
+    --   u8 rio_timed_at_or_above, u8 rio_timed_at_or_above_minus1,
+    --   u8 rio_timed_at_or_above_minus2, u8 rio_completed_at_or_above_minus1,
+    --   u8 rio_dungeon_count, u8 role, len-prefixed name.
     local memberOut = {}
     local emittedCount = 0
     for _, app in ipairs(validApps) do
@@ -1462,7 +1570,20 @@ local function BuildPayload(entry, applicantIDs)
                 table.insert(memberOut, _Uint16BE(SafeNumber(specID, 0)))
                 table.insert(memberOut, _Uint16BE(SafeRoundedNumber(ilvl, 0)))
                 table.insert(memberOut, _Uint16BE(_ClampUInt16(SafeRoundedNumber(score, 0))))
-                table.insert(memberOut, _Uint16BE(_GetRaiderIOMainScore(memberName)))
+                local rioSummary = _GetRaiderIOMPlusSummary(
+                    memberName,
+                    listingActivityIDForRio,
+                    listingKeyLevelForRio
+                )
+                table.insert(memberOut, _Uint16BE(rioSummary.mainScore))
+                table.insert(memberOut, string.char(rioSummary.hasProfile and 1 or 0))
+                table.insert(memberOut, string.char(rioSummary.bestKey))
+                table.insert(memberOut, string.char(rioSummary.bestDungeonKey))
+                table.insert(memberOut, string.char(rioSummary.timedAtOrAbove))
+                table.insert(memberOut, string.char(rioSummary.timedAtOrAboveMinus1))
+                table.insert(memberOut, string.char(rioSummary.timedAtOrAboveMinus2))
+                table.insert(memberOut, string.char(rioSummary.completedAtOrAboveMinus1))
+                table.insert(memberOut, string.char(rioSummary.dungeonCount))
                 table.insert(memberOut, string.char(ROLE_NAME_TO_BYTE[roleToken] or 2))
                 _PackLenStr(memberOut, memberName)
                 emittedCount = emittedCount + 1

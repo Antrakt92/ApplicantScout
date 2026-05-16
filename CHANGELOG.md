@@ -1,13 +1,16 @@
 # Changelog
 
-## 0.1.7 - 16-May-2026 - Companion 0.2.5 lifecycle hardening
+## 0.2.0 - 16-May-2026 - Companion 0.3.0 RaiderIO completion scoring
 
-This paired addon + companion release tightens QR force-shot behavior, support
-commands, and release readiness around the desktop companion's screenshot
-pipeline hardening.
+This paired addon + companion release adds RaiderIO per-dungeon completion
+signals to the QR payload so the companion can judge real near-key experience
+alongside Warcraft Logs parses.
 
 ### Improved
 
+- ApplicantScout payloads now include a compact RaiderIO completion summary for
+  the hosted key: best completed key, best key for the listed dungeon, timed
+  coverage around the target level, and completed coverage one level below.
 - Forced QR snapshots now refresh the active LFG session immediately before
   building the payload, so `/apscout shotnow` and cleanup shots use the latest
   Blizzard listing state.
@@ -27,11 +30,11 @@ pipeline hardening.
 
 ### Notes
 
-- No wire-format changes since `0.1.4`; the companion still supports
-  ApplicantScout payloads through v4.
+- Wire payload v5 is new in this release. The paired companion supports older
+  payloads through v5.
 - ApplicantScout remains the in-game data-source half of the setup; the desktop
   companion renders Warcraft Logs / RaiderIO context.
-- Recommended companion version: `0.2.5` or newer.
+- Recommended companion version: `0.3.0` or newer.
 
 ## 0.1.6 - 16-May-2026 - Companion 0.2.4 live Mythic+ hardening
 
