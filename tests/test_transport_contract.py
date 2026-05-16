@@ -51,7 +51,33 @@ def test_force_screenshot_temporarily_makes_hidden_qr_visible_for_clear_shot():
     assert "force and not _IsQRVisibleForScreenshot()" in screenshot_body
     assert "qrForceVisibleForShot = true" in screenshot_body
     assert "forceVisibleShotDelay = QR_RENDER_SETTLE_S" in screenshot_body
-    assert "qrForceVisibleForShot = false" in screenshot_body
+    assert "_ReleaseForceVisibleShotLease(forceVisibleShotGen)" in screenshot_body
+    assert "qrForceVisibleForShot = false" in source
+
+
+def test_force_screenshot_releases_visibility_lease_when_qr_encode_fails():
+    source = _lua_source()
+    body = _slice_between(
+        source,
+        "MaybeTriggerScreenshot = function(force, entryHint)",
+        "-- LFG entry creation",
+    )
+
+    matrix_fail = _slice_between(body, "if not matrix then", "if not PaintQR(matrix) then")
+    paint_fail = _slice_between(body, "if not PaintQR(matrix) then", "lastShotTime = now")
+
+    assert "_ReleaseForceVisibleShotLease(forceVisibleShotGen)" in matrix_fail
+    assert "_ReleaseForceVisibleShotLease(forceVisibleShotGen)" in paint_fail
+
+
+def test_safe_str_strips_player_links_before_bare_pipe_cleanup():
+    source = _lua_source()
+    body = _slice_between(source, "SafeStr = function(v, secretFallback)", "local function SafeDiag")
+
+    player_link_idx = body.index('s = s:gsub("|K[^|]*|k", "")')
+    bare_pipe_idx = body.index('s = s:gsub("|", "")')
+
+    assert player_link_idx < bare_pipe_idx
 
 
 def test_default_playstyle_checks_secret_activity_before_nil_comparison():

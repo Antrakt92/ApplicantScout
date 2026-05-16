@@ -220,6 +220,7 @@ SafeStr = function(v, secretFallback)
     s = s:gsub("|c%x%x%x%x%x%x%x%x", "")  -- color start |cAARRGGBB
     s = s:gsub("|c%x%x%x%x%x%x", "")      -- short color |cRRGGBB
     s = s:gsub("|r", "")                   -- color reset
+    s = s:gsub("|K[^|]*|k", "")            -- protected player link text
     s = s:gsub("|H[^|]*|h", "")            -- link start
     s = s:gsub("|h", "")                   -- link end
     s = s:gsub("|T[^|]*|t", "")            -- texture
@@ -1737,6 +1738,13 @@ qrForceVisibleForShot = false
 qrForceVisibleShotGen = 0
 local SHOT_THROTTLE_S = 0.5
 
+local function _ReleaseForceVisibleShotLease(forceVisibleShotGen)
+    if forceVisibleShotGen and qrForceVisibleShotGen == forceVisibleShotGen then
+        qrForceVisibleForShot = false
+        _RefreshQRVisibility()
+    end
+end
+
 -- Build payload, dedup vs last hash, throttle, paint QR, trigger Screenshot.
 -- force=true bypasses dedup AND throttle (used by EndSession + /apscout shotnow).
 -- entryHint: optional pre-fetched C_LFGList.GetActiveEntryInfo() result from
@@ -1834,12 +1842,14 @@ MaybeTriggerScreenshot = function(force, entryHint)
         -- fire immediately when data changes, not wait out throttle.
         lastSnapshotHash = h
         pendingShotDirty = false
+        _ReleaseForceVisibleShotLease(forceVisibleShotGen)
         return
     end
     if not PaintQR(matrix) then
         -- Same retry-suppression rationale as above.
         lastSnapshotHash = h
         pendingShotDirty = false
+        _ReleaseForceVisibleShotLease(forceVisibleShotGen)
         return
     end
 
@@ -1862,10 +1872,7 @@ MaybeTriggerScreenshot = function(force, entryHint)
         Screenshot()
         if forceVisibleShotGen then
             C_Timer.After(0.05, function()
-                if qrForceVisibleShotGen == forceVisibleShotGen then
-                    qrForceVisibleForShot = false
-                    _RefreshQRVisibility()
-                end
+                _ReleaseForceVisibleShotLease(forceVisibleShotGen)
             end)
         end
     end)
