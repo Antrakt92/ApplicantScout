@@ -1626,7 +1626,112 @@ local function _UnitClassIDForRoster(unit)
     return CLASS_NAME_TO_ID[classToken] or 0
 end
 
+local rosterInspectSpecByGUID = {}
+local rosterInspectPendingGUID = nil
+local rosterInspectLastRequestTime = 0
+local ROSTER_INSPECT_THROTTLE_S = 1.0
+local ROSTER_INSPECT_TIMEOUT_S = 4.0
+
+local function _UnitGUIDForRoster(unit)
+    if not UnitGUID then return "" end
+    local ok, guid = pcall(UnitGUID, unit)
+    if not ok then return "" end
+    return SafeStr(guid, "")
+end
+
+local function _ForEachRosterUnit(callback)
+    if type(callback) ~= "function" then return end
+    local groupCount = math.floor(SafeNumber(GetNumGroupMembers and GetNumGroupMembers(), 0))
+    if groupCount <= 0 then return end
+
+    if IsInRaid and IsInRaid() then
+        if groupCount > 40 then groupCount = 40 end
+        for i = 1, groupCount do
+            if callback("raid" .. i) then return end
+        end
+        return
+    end
+
+    if callback("player") then return end
+    local partyCount = groupCount - 1
+    if partyCount > 4 then partyCount = 4 end
+    for i = 1, partyCount do
+        if callback("party" .. i) then return end
+    end
+end
+
+local function _FindRosterUnitByGUID(guid)
+    guid = SafeStr(guid, "")
+    if guid == "" then return nil end
+    local found = nil
+    _ForEachRosterUnit(function(unit)
+        if _UnitGUIDForRoster(unit) == guid then
+            found = unit
+            return true
+        end
+        return false
+    end)
+    return found
+end
+
+local function _MaybeRequestRosterInspect(unit, guid)
+    if not (NotifyInspect and CanInspect) then return end
+    if UnitIsUnit and UnitIsUnit(unit, "player") then return end
+    if InCombatLockdown and InCombatLockdown() then return end
+    guid = SafeStr(guid, "")
+    if guid == "" then return end
+    if rosterInspectSpecByGUID[guid] and rosterInspectSpecByGUID[guid] > 0 then
+        return
+    end
+
+    local now = GetTime and GetTime() or 0
+    if rosterInspectPendingGUID
+       and rosterInspectPendingGUID ~= guid
+       and (now - rosterInspectLastRequestTime) < ROSTER_INSPECT_TIMEOUT_S then
+        return
+    end
+    if (now - rosterInspectLastRequestTime) < ROSTER_INSPECT_THROTTLE_S then
+        return
+    end
+
+    local okCan, canInspect = pcall(CanInspect, unit)
+    if not (okCan and canInspect) then return end
+    local ok = pcall(NotifyInspect, unit)
+    if ok then
+        rosterInspectPendingGUID = guid
+        rosterInspectLastRequestTime = now
+    end
+end
+
+local function _OnRosterInspectReady(guid)
+    guid = SafeStr(guid, "")
+    if guid == "" then
+        guid = SafeStr(rosterInspectPendingGUID, "")
+    end
+    if guid == "" then return end
+
+    local unit = _FindRosterUnitByGUID(guid)
+    if not unit then return end
+    if not GetInspectSpecialization then return end
+    local ok, specID = pcall(GetInspectSpecialization, unit)
+    specID = ok and _ClampUInt16(SafeNumber(specID, 0)) or 0
+    if specID > 0 then
+        rosterInspectSpecByGUID[guid] = specID
+        if rosterInspectPendingGUID == guid then
+            rosterInspectPendingGUID = nil
+        end
+        if ClearInspectPlayer then pcall(ClearInspectPlayer) end
+        MarkDirty("inspect")
+    end
+end
+
 local function _UnitSpecIDForRoster(unit)
+    local guid = _UnitGUIDForRoster(unit)
+    if guid ~= "" then
+        local cachedSpecID = _ClampUInt16(SafeNumber(rosterInspectSpecByGUID[guid], 0))
+        if cachedSpecID > 0 then return cachedSpecID end
+    end
+
     if UnitIsUnit and UnitIsUnit(unit, "player") then
         if GetSpecialization and GetSpecializationInfo then
             local okSpec, specIndex = pcall(GetSpecialization)
@@ -1639,8 +1744,13 @@ local function _UnitSpecIDForRoster(unit)
     end
     if GetInspectSpecialization then
         local ok, specID = pcall(GetInspectSpecialization, unit)
-        if ok then return _ClampUInt16(SafeNumber(specID, 0)) end
+        specID = ok and _ClampUInt16(SafeNumber(specID, 0)) or 0
+        if specID > 0 then
+            if guid ~= "" then rosterInspectSpecByGUID[guid] = specID end
+            return specID
+        end
     end
+    _MaybeRequestRosterInspect(unit, guid)
     return 0
 end
 
@@ -2583,6 +2693,9 @@ local EVENT_HANDLERS = {
     GROUP_ROSTER_UPDATE              = function() MarkDirty("roster") end,
     GROUP_LEFT                       = function() MarkDirty("groupleft") end,
     PLAYER_SPECIALIZATION_CHANGED      = function() MarkDirty("spec") end,
+    INSPECT_READY                    = function(_, guid)
+        _OnRosterInspectReady(guid)
+    end,
 }
 
 -- Bind every interaction event to _OnInteractionEvent. Loop populates the

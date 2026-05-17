@@ -269,6 +269,41 @@ def test_roster_payload_rows_include_key_summary_and_group_metadata():
     assert "emittedCount = emittedCount + 1" in roster_body
 
 
+def test_roster_spec_resolution_requests_inspect_when_spec_is_unknown():
+    source = _lua_source()
+    spec_body = _slice_between(
+        source,
+        "local function _UnitSpecIDForRoster(unit)",
+        "local function _UnitItemLevelForRoster(unit)",
+    )
+
+    inspect_idx = spec_body.index("GetInspectSpecialization")
+    request_idx = spec_body.index("_MaybeRequestRosterInspect(unit, guid)")
+    fallback_idx = spec_body.index("return 0", request_idx)
+
+    assert "rosterInspectSpecByGUID[guid]" in spec_body
+    assert inspect_idx < request_idx < fallback_idx
+
+
+def test_inspect_ready_marks_roster_dirty_after_caching_spec():
+    source = _lua_source()
+    inspect_body = _slice_between(
+        source,
+        "local function _OnRosterInspectReady(guid)",
+        "local function _UnitSpecIDForRoster(unit)",
+    )
+    events_body = _slice_between(
+        source,
+        "local EVENT_HANDLERS = {",
+        "-- Bind every interaction event",
+    )
+
+    assert "rosterInspectSpecByGUID[guid] = specID" in inspect_body
+    assert 'MarkDirty("inspect")' in inspect_body
+    assert 'INSPECT_READY                    = function(_, guid)' in events_body
+    assert "_OnRosterInspectReady(guid)" in events_body
+
+
 def test_roster_dirty_events_are_registered():
     source = _lua_source()
     events_body = _slice_between(
