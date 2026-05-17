@@ -1,12 +1,14 @@
 # Changelog
 
-## 0.2.0 - 16-May-2026 - Companion 0.3.0 RaiderIO completion and dungeon keys
+## 0.2.0 - 17-May-2026 - Companion 0.3.0 RaiderIO completion and dungeon keys
 
 This paired addon + companion release adds compact RaiderIO completion signals
 to the QR payload so the companion can judge real near-key experience alongside
 Warcraft Logs parses. Per-dungeon RaiderIO rows are enriched by the companion
 from the installed local RaiderIO database instead of being packed into every
-QR screenshot.
+QR screenshot. It also tightens live hosted-key detection and makes the
+companion bring cached Warcraft Logs evidence into the overlay faster during
+busy applicant bursts.
 
 ### Improved
 
@@ -31,6 +33,9 @@ QR screenshot.
   WCL evidence aligned.
 - The paired companion now separates Warcraft Logs key level and percentile in
   hover details, so RaiderIO and WCL evidence is easier to scan during invites.
+- The paired companion now applies cached Warcraft Logs results before queueing
+  new API work, coalesces applicant/table refresh bursts, and shows active WCL
+  fetches while quota data is still pending.
 - The addon QR payload is back to the compact v5 shape: live LFG state plus the
   target-relative RaiderIO summary only. Static per-dungeon RIO strings stay out
   of QR transport.
@@ -58,8 +63,15 @@ QR screenshot.
 - Fixed RaiderIO summary best-key signals using depleted runs; compact payload
   best keys now describe timed runs, matching the companion's local RaiderIO
   dungeon-row enrichment.
+- Fixed listed Mythic+ key detection by remembering the clean key title/comment
+  from the create/edit form before Blizzard hides the active listing text, so a
+  lower posted key is not scored as the higher key in the host's bag.
+- Fixed stale posted-key cache reuse when a later listing cannot expose a clean
+  key title/comment during creation.
 - Fixed paired companion edge cases where lower-key Warcraft Logs evidence or
   hyphenated realm names could hide stronger RaiderIO timed-key evidence.
+- Fixed paired companion hover rows showing empty placeholder RIO/WCL badges
+  when only one evidence source exists for a dungeon.
 - Fixed prepared QR snapshots becoming excessively large when repeated
   per-dungeon RaiderIO names were embedded for every applicant.
 

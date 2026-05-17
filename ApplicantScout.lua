@@ -193,6 +193,9 @@ local lfgDefaultPlaystyleHooksSetup = false
 local lfgDefaultPlaystyleApplying = false
 local lfgDefaultPlaystyleHookError = nil
 local lfgDefaultPlaystyleTouchedPanels = setmetatable({}, { __mode = "k" })
+local lfgEntryCreationKeyCaptureHooked = setmetatable({}, { __mode = "k" })
+local entryCreationKeyLevelCache = nil
+local ENTRY_CREATION_KEY_CACHE_TTL = 3600
 
 -- ───────────────────────────────────────────────────────────
 -- helpers
@@ -422,6 +425,7 @@ EndSession = function()
     -- early-returned (qrFrame missing, QR encode failure) the flag could persist
     -- across sessions and trigger empty drains in the scan ticker. Clear here.
     pendingShotDirty = false
+    entryCreationKeyLevelCache = nil
 
     -- Schedule deferred Hide AFTER the final clear-shot has had a chance to
     -- fire. The screenshot path inside MaybeTriggerScreenshot is
@@ -1210,6 +1214,205 @@ local function _ExtractKeystoneLevelFromText(value)
     return _NormalizeKeystoneLevel(m)
 end
 
+local function _ExtractKeystoneLevelFromShortKeyText(value)
+    local keyLevel = _ExtractKeystoneLevelFromText(value)
+    if keyLevel > 0 then return keyLevel end
+
+    local s = SafeStr(value, "")
+    if s == "" then return 0 end
+    s = s:gsub("^%s+", ""):gsub("%s+$", "")
+    -- Blizzard can render titles like "+10", "+10 Competitive", or with a
+    -- plus-like glyph that is not ASCII. Digit-filter only short title/UI
+    -- fields; comments still require an explicit ASCII "+N" match.
+    if #s > 40 then return 0 end
+    local digits = s:gsub("%D+", "")
+    if #digits < 1 or #digits > 2 then return 0 end
+    return _NormalizeKeystoneLevel(digits)
+end
+
+local function _ReadCleanWidgetText(widget)
+    if not (widget and type(widget.GetText) == "function") then return "" end
+    local ok, text = pcall(widget.GetText, widget)
+    if not ok or IsSecretValue(text) then return "" end
+    return SafeStr(text, "")
+end
+
+local function _GetCachedEntryCreationKeystoneLevel(activityID, questID)
+    local cache = entryCreationKeyLevelCache
+    if not cache then return 0 end
+    if GetTime and (GetTime() - cache.at) > ENTRY_CREATION_KEY_CACHE_TTL then
+        entryCreationKeyLevelCache = nil
+        return 0
+    end
+
+    activityID = math.floor(SafeNumber(activityID, 0))
+    questID = math.floor(SafeNumber(questID, 0))
+    if cache.activityID > 0 and activityID > 0 and cache.activityID ~= activityID then
+        return 0
+    end
+    if cache.questID > 0 and questID > 0 and cache.questID ~= questID then
+        return 0
+    end
+    return _NormalizeKeystoneLevel(cache.keyLevel)
+end
+
+local function _ClearEntryCreationKeystoneLevelCache(activityID, questID)
+    local cache = entryCreationKeyLevelCache
+    if not cache then return end
+    activityID = math.floor(SafeNumber(activityID, 0))
+    questID = math.floor(SafeNumber(questID, 0))
+    if cache.activityID > 0 and activityID > 0 and cache.activityID ~= activityID then
+        return
+    end
+    if cache.questID > 0 and questID > 0 and cache.questID ~= questID then
+        return
+    end
+    entryCreationKeyLevelCache = nil
+end
+
+local function _RememberEntryCreationKeystoneLevel(panel, reason)
+    if not panel then return false end
+
+    local activityID = panel.selectedActivity
+    if IsSecretValue(activityID) then return false end
+    activityID = math.floor(SafeNumber(activityID, 0))
+    if activityID <= 0 then return false end
+
+    local activityInfo = nil
+    if C_LFGList and C_LFGList.GetActivityInfoTable then
+        activityInfo = SafeTable(C_LFGList.GetActivityInfoTable(activityID))
+    end
+    if not activityInfo then return false end
+    local isMythicPlusActivity = activityInfo.isMythicPlusActivity
+    if IsSecretValue(isMythicPlusActivity)
+       or IsSecretValue(activityInfo.categoryID) then
+        return false
+    end
+    if isMythicPlusActivity ~= true
+       and math.floor(SafeNumber(activityInfo.categoryID, 0)) ~= 2 then
+        return false
+    end
+
+    local nameText = _ReadCleanWidgetText(panel.Name)
+    local commentText = _ReadCleanWidgetText(panel.Description)
+    local keyLevel = _ExtractKeystoneLevelFromShortKeyText(nameText)
+    if keyLevel == 0 then
+        keyLevel = _ExtractKeystoneLevelFromText(commentText)
+    end
+    local questID = math.floor(SafeNumber(panel.questID, 0))
+    if keyLevel == 0 then
+        _ClearEntryCreationKeystoneLevelCache(activityID, questID)
+        return false
+    end
+
+    entryCreationKeyLevelCache = {
+        activityID = activityID,
+        questID = questID,
+        keyLevel = keyLevel,
+        at = GetTime and GetTime() or 0,
+    }
+    if ApplicantScoutDB and ApplicantScoutDB.debug then
+        print("|cff999999[APS-debug]|r LFG posted key cached: +"
+              .. tostring(keyLevel)
+              .. (reason and (" (" .. reason .. ")") or ""))
+    end
+    return true
+end
+
+local function _HookEntryCreationKeyCapture(panel)
+    if not panel or lfgEntryCreationKeyCaptureHooked[panel] then return end
+    lfgEntryCreationKeyCaptureHooked[panel] = true
+
+    local button = panel.ListGroupButton
+    if button and type(button.HookScript) == "function" then
+        button:HookScript("OnClick", function()
+            _RememberEntryCreationKeystoneLevel(panel, "button")
+        end)
+    end
+
+    local nameBox = panel.Name
+    if nameBox and type(nameBox.HookScript) == "function" then
+        nameBox:HookScript("OnEnterPressed", function()
+            _RememberEntryCreationKeystoneLevel(panel, "enter")
+        end)
+    end
+end
+
+local function _GetVisibleApplicationViewerKeystoneLevel()
+    local lfgFrame = _G.LFGListFrame
+    local viewer = lfgFrame and lfgFrame.ApplicationViewer
+    if not viewer then return 0 end
+    if type(viewer.IsShown) == "function" and not viewer:IsShown() then return 0 end
+
+    local candidates = {
+        { label = "EntryName", fontString = viewer.EntryName },
+        {
+            label = "DescriptionFrame.Text",
+            fontString = viewer.DescriptionFrame and viewer.DescriptionFrame.Text,
+        },
+    }
+    for _, candidate in ipairs(candidates) do
+        local fontString = candidate.fontString
+        if fontString and type(fontString.GetText) == "function" then
+            local ok, text = pcall(fontString.GetText, fontString)
+            if ok and not IsSecretValue(text) then
+                local keyLevel = _ExtractKeystoneLevelFromShortKeyText(text)
+                if keyLevel > 0 then
+                    return keyLevel
+                end
+            end
+        end
+    end
+    return 0
+end
+
+local function _GetVisibleApplicationViewerKeystoneDiagnostics()
+    local lines = {}
+    local lfgFrame = _G.LFGListFrame
+    local viewer = lfgFrame and lfgFrame.ApplicationViewer
+    lines[#lines + 1] = "  visibleFrame.viewer: " .. tostring(viewer ~= nil)
+    if not viewer then return lines end
+
+    local shown = "n/a"
+    if type(viewer.IsShown) == "function" then
+        local ok, result = pcall(viewer.IsShown, viewer)
+        shown = ok and tostring(result) or "<error>"
+    end
+    lines[#lines + 1] = "  visibleFrame.viewerShown: " .. shown
+
+    local candidates = {
+        { label = "EntryName", fontString = viewer.EntryName },
+        {
+            label = "DescriptionFrame.Text",
+            fontString = viewer.DescriptionFrame and viewer.DescriptionFrame.Text,
+        },
+    }
+    for _, candidate in ipairs(candidates) do
+        local label = candidate.label
+        local fontString = candidate.fontString
+        if fontString and type(fontString.GetText) == "function" then
+            local ok, text = pcall(fontString.GetText, fontString)
+            if ok then
+                local isSecret = IsSecretValue(text)
+                local keyLevel = isSecret and 0 or _ExtractKeystoneLevelFromShortKeyText(text)
+                lines[#lines + 1] = "  visibleFrame." .. label
+                    .. ": " .. SafeDiag(text)
+                    .. " secret=" .. tostring(isSecret)
+                    .. " key=" .. tostring(keyLevel)
+            else
+                lines[#lines + 1] = "  visibleFrame." .. label .. ": <error>"
+            end
+        else
+            lines[#lines + 1] = "  visibleFrame." .. label .. ": nil"
+        end
+    end
+    return lines
+end
+_G.ApplicantScout_VisibleApplicationViewerKeystoneDiagnostics =
+    _GetVisibleApplicationViewerKeystoneDiagnostics
+_G.ApplicantScout_VisibleApplicationViewerKeystoneLevel =
+    _GetVisibleApplicationViewerKeystoneLevel
+
 local function _GetActivityInfoForListing(activityID, questID)
     if not (C_LFGList and C_LFGList.GetActivityInfoTable) then return nil end
     activityID = math.floor(SafeNumber(activityID, 0))
@@ -1251,25 +1454,33 @@ local function _GetOwnedKeystoneListingInfo()
     return ownedActivityID, ownedGroupID, ownedLevel, ownedInfo
 end
 
-local function _GetListingKeystoneLevel(activityID, listingName, listingComment, ownedLevel)
-    -- C_LFGList.GetKeystoneForActivity is the listing-level source. Text
-    -- parsing stays as fallback because some custom titles/comments include
-    -- "+N", while Blizzard's active-entry name often does not.
-    local keyLevel = 0
-    if C_LFGList and C_LFGList.GetKeystoneForActivity and activityID > 0 then
-        keyLevel = _NormalizeKeystoneLevel(C_LFGList.GetKeystoneForActivity(activityID))
-    end
-    if keyLevel == 0 then
-        keyLevel = _NormalizeKeystoneLevel(ownedLevel)
-    end
-    if keyLevel == 0 then
-        keyLevel = _ExtractKeystoneLevelFromText(listingName)
-    end
+local function _GetListingKeystoneLevel(activityID, questID, listingName, listingComment, activityInfo)
+    -- WARNING: C_LFGList.GetKeystoneForActivity can report the host's owned
+    -- key for this dungeon instead of the active posted listing level.
+    local keyLevel = _ExtractKeystoneLevelFromShortKeyText(listingName)
     if keyLevel == 0 then
         keyLevel = _ExtractKeystoneLevelFromText(listingComment)
     end
+    if keyLevel == 0 then
+        keyLevel = _GetVisibleApplicationViewerKeystoneLevel()
+    end
+    if keyLevel == 0 then
+        keyLevel = _GetCachedEntryCreationKeystoneLevel(activityID, questID)
+    end
+    activityInfo = SafeTable(activityInfo)
+    if keyLevel == 0 and activityInfo then
+        local activityShortName = SafeStr(activityInfo.shortName, "")
+        keyLevel = _ExtractKeystoneLevelFromText(activityShortName)
+    end
+    if keyLevel == 0 and activityInfo then
+        local activityFullName = SafeStr(activityInfo.fullName, "")
+        keyLevel = _ExtractKeystoneLevelFromText(activityFullName)
+    end
     return keyLevel
 end
+_G.ApplicantScout_GetListingKeystoneLevel = _GetListingKeystoneLevel
+_G.ApplicantScout_CachedEntryCreationKeystoneLevel =
+    _GetCachedEntryCreationKeystoneLevel
 
 local function _RaiderIODungeonMatchesActivity(dungeon, listingActivityID)
     dungeon = SafeTable(dungeon)
@@ -1475,6 +1686,13 @@ local function BuildPayload(entry, applicantIDs)
 
         local keyLevel = 0
         if isMythicPlus then
+            keyLevel = _GetListingKeystoneLevel(
+                activityID,
+                questID,
+                listingName,
+                listingComment,
+                activityInfo
+            )
             local ownedActivityID, _ownedGroupID, ownedLevel, ownedInfo =
                 _GetOwnedKeystoneListingInfo()
             local shouldUseOwnedKeystone = ownedLevel > 0
@@ -1490,12 +1708,6 @@ local function BuildPayload(entry, applicantIDs)
                 categoryID = math.floor(SafeNumber(activityInfo.categoryID, categoryID))
                 difficultyID = math.floor(SafeNumber(activityInfo.difficultyID, difficultyID))
             end
-            keyLevel = _GetListingKeystoneLevel(
-                activityID,
-                listingName,
-                listingComment,
-                shouldUseOwnedKeystone and ownedLevel or 0
-            )
         end
         listingActivityIDForRio = activityID
         listingKeyLevelForRio = keyLevel
@@ -2111,13 +2323,16 @@ _SetupLFGDefaultPlaystyle = function()
 
     local ok, err = pcall(function()
         hook("LFGListEntryCreation_Select", function(panel)
+            _HookEntryCreationKeyCapture(panel)
             _MaybeAutoSelectDefaultPlaystyle(panel, "select")
         end)
         hook("LFGListEntryCreation_Show", function(panel)
+            _HookEntryCreationKeyCapture(panel)
             if panel then lfgDefaultPlaystyleTouchedPanels[panel] = nil end
             _MaybeAutoSelectDefaultPlaystyle(panel, "show")
         end)
         hook("LFGListEntryCreation_SetEditMode", function(panel, editMode)
+            _HookEntryCreationKeyCapture(panel)
             if not editMode then
                 _MaybeAutoSelectDefaultPlaystyle(panel, "create-mode")
             end
@@ -2141,6 +2356,7 @@ _SetupLFGDefaultPlaystyle = function()
     lfgDefaultPlaystyleHooksSetup = true
     local frame = _G.LFGListFrame
     if frame and frame.EntryCreation then
+        _HookEntryCreationKeyCapture(frame.EntryCreation)
         _MaybeAutoSelectDefaultPlaystyle(frame.EntryCreation, "setup")
     end
     return true
@@ -2711,6 +2927,8 @@ SlashCmdList.APSCOUT = function(msg)
             if cleanActivityID > 0 then
                 if statusActivityInfo then
                     print("  activity.name: " .. statusDungeonName)
+                    print("  activity.shortName: " .. SafeDiag(statusActivityInfo.shortName))
+                    print("  activity.fullName: " .. SafeDiag(statusActivityInfo.fullName))
                     print("  activity.categoryID: " .. SafeDiag(statusActivityInfo.categoryID))
                     print("  activity.difficultyID: " .. SafeDiag(statusActivityInfo.difficultyID))
                 end
@@ -2723,6 +2941,21 @@ SlashCmdList.APSCOUT = function(msg)
             end
             print("  entry.name: " .. SafeDiag(entry.name))
             print("  entry.comment: " .. SafeDiag(entry.comment))
+            local visibleKeyLevel =
+                _G.ApplicantScout_VisibleApplicationViewerKeystoneLevel
+            print("  visibleFrame.keyLevel: "
+                  .. tostring(visibleKeyLevel and visibleKeyLevel() or 0))
+            local visibleDiagnostics =
+                _G.ApplicantScout_VisibleApplicationViewerKeystoneDiagnostics
+            visibleDiagnostics = visibleDiagnostics and visibleDiagnostics() or {}
+            for _, line in ipairs(visibleDiagnostics) do
+                print(line)
+            end
+            local cachedLevel =
+                _G.ApplicantScout_CachedEntryCreationKeystoneLevel
+            local cachedKeyLevel =
+                cachedLevel and cachedLevel(cleanActivityID, cleanQuestID) or 0
+            print("  entryCreationCache.keyLevel: " .. tostring(cachedKeyLevel))
             local statusListingName = SafeStr(entry.name, "?"):gsub("|K[^|]*|k", "")
             local statusListingComment = SafeStr(entry.comment, "?")
             local ownedActivityID, ownedGroupID, ownedLevel, ownedInfo =
@@ -2738,12 +2971,15 @@ SlashCmdList.APSCOUT = function(msg)
                     or statusDungeonName == "Mythic+"
                     or statusDungeonName == "?")
             print("  ownedKeystone.usedForListing: " .. tostring(statusUseOwned))
+            local listingKeyLevel =
+                _G.ApplicantScout_GetListingKeystoneLevel
             print("  derived keyLevel: "
-                  .. tostring(_GetListingKeystoneLevel(
-                      statusUseOwned and ownedActivityID or cleanActivityID,
+                  .. tostring(listingKeyLevel and listingKeyLevel(
+                      cleanActivityID,
+                      cleanQuestID,
                       statusListingName,
                       statusListingComment,
-                      statusUseOwned and ownedLevel or 0)))
+                      statusActivityInfo) or 0))
         else
             print("  entry: nil")
         end

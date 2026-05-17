@@ -153,6 +153,173 @@ def test_payload_still_includes_raiderio_completion_summary():
     assert "rioSummary.bestDungeonKey" in payload_body
 
 
+def test_listing_key_level_does_not_fall_back_to_owned_keystone_level():
+    source = _lua_source()
+    helper_body = _slice_between(
+        source,
+        "local function _GetListingKeystoneLevel(",
+        "local function _RaiderIODungeonMatchesActivity(dungeon, listingActivityID)",
+    )
+    payload_body = _slice_between(
+        source,
+        "local function BuildPayload(entry, applicantIDs)",
+        "local function HashSnapshot(payload)",
+    )
+    status_body = _slice_between(
+        source,
+        'elseif msg == "status" then',
+        'elseif msg == "taintcheck" then',
+    )
+
+    assert helper_body.startswith(
+        "local function _GetListingKeystoneLevel(activityID, questID, listingName, listingComment, activityInfo)"
+    )
+    assert "ownedLevel" not in helper_body
+    assert "shouldUseOwnedKeystone and ownedLevel or 0" not in payload_body
+    assert "statusUseOwned and ownedLevel or 0" not in status_body
+
+
+def test_listing_key_level_prefers_visible_posted_level_over_activity_text():
+    source = _lua_source()
+    helper_body = _slice_between(
+        source,
+        "local function _GetListingKeystoneLevel(",
+        "local function _RaiderIODungeonMatchesActivity(dungeon, listingActivityID)",
+    )
+
+    name_idx = helper_body.index("_ExtractKeystoneLevelFromShortKeyText(listingName)")
+    comment_idx = helper_body.index("_ExtractKeystoneLevelFromText(listingComment)")
+    visible_idx = helper_body.index("_GetVisibleApplicationViewerKeystoneLevel()")
+    cached_idx = helper_body.index("_GetCachedEntryCreationKeystoneLevel(activityID, questID)")
+    short_idx = helper_body.index("_ExtractKeystoneLevelFromText(activityShortName)")
+    full_idx = helper_body.index("_ExtractKeystoneLevelFromText(activityFullName)")
+
+    assert "GetKeystoneForActivity(" not in helper_body
+    assert name_idx < comment_idx < visible_idx < cached_idx < short_idx < full_idx
+
+
+def test_listing_key_level_uses_active_creation_form_cache():
+    source = _lua_source()
+    payload_body = _slice_between(
+        source,
+        "local function BuildPayload(entry, applicantIDs)",
+        "local function HashSnapshot(payload)",
+    )
+    creation_body = source[
+        source.index("local function _RememberEntryCreationKeystoneLevel(panel, reason)") :
+    ]
+    helper_body = _slice_between(
+        source,
+        "local function _GetListingKeystoneLevel(",
+        "local function _RaiderIODungeonMatchesActivity(dungeon, listingActivityID)",
+    )
+
+    assert "entryCreationKeyLevelCache" in source
+    assert "_HookEntryCreationKeyCapture(frame.EntryCreation" in source
+    assert ':HookScript("OnClick", function()' in creation_body
+    assert "panel.Name" in creation_body
+    assert "panel.Description" in creation_body
+    assert "_ExtractKeystoneLevelFromShortKeyText(nameText)" in creation_body
+    assert "_ExtractKeystoneLevelFromText(commentText)" in creation_body
+    assert "_GetCachedEntryCreationKeystoneLevel(activityID, questID)" in helper_body
+    assert "_GetListingKeystoneLevel(" in payload_body
+    assert "activityID,\n                questID,\n                listingName" in payload_body
+
+
+def test_entry_creation_cache_clears_when_posted_key_cannot_be_read():
+    source = _lua_source()
+    creation_body = _slice_between(
+        source,
+        "local function _RememberEntryCreationKeystoneLevel(panel, reason)",
+        "local function _HookEntryCreationKeyCapture(panel)",
+    )
+
+    assert "local questID = math.floor(SafeNumber(panel.questID, 0))" in creation_body
+    assert "if keyLevel == 0 then" in creation_body
+    assert "_ClearEntryCreationKeystoneLevelCache(activityID, questID)" in creation_body
+    assert creation_body.index("_ClearEntryCreationKeystoneLevelCache(activityID, questID)") < (
+        creation_body.index("entryCreationKeyLevelCache = {")
+    )
+
+
+def test_listing_key_level_accepts_short_visible_key_titles_only():
+    source = _lua_source()
+    helper_body = _slice_between(
+        source,
+        "local function _ExtractKeystoneLevelFromShortKeyText(value)",
+        "local function _GetVisibleApplicationViewerKeystoneLevel()",
+    )
+    listing_body = _slice_between(
+        source,
+        "local function _GetListingKeystoneLevel(",
+        "local function _RaiderIODungeonMatchesActivity(dungeon, listingActivityID)",
+    )
+    visible_body = _slice_between(
+        source,
+        "local function _GetVisibleApplicationViewerKeystoneLevel()",
+        "local function _GetListingKeystoneLevel(",
+    )
+
+    assert "_ExtractKeystoneLevelFromText(value)" in helper_body
+    assert "#s > 40" in helper_body
+    assert 'local digits = s:gsub("%D+", "")' in helper_body
+    assert "#digits < 1 or #digits > 2" in helper_body
+    assert "_NormalizeKeystoneLevel(digits)" in helper_body
+    assert "_ExtractKeystoneLevelFromShortKeyText(listingName)" in listing_body
+    assert "_ExtractKeystoneLevelFromText(listingComment)" in listing_body
+    assert "_ExtractKeystoneLevelFromShortKeyText(text)" in visible_body
+
+
+def test_listing_key_level_can_read_clean_application_viewer_text():
+    source = _lua_source()
+    visible_body = _slice_between(
+        source,
+        "local function _GetVisibleApplicationViewerKeystoneLevel()",
+        "local function _GetListingKeystoneLevel(",
+    )
+    helper_body = _slice_between(
+        source,
+        "local function _GetListingKeystoneLevel(",
+        "local function _RaiderIODungeonMatchesActivity(dungeon, listingActivityID)",
+    )
+    status_body = _slice_between(
+        source,
+        'elseif msg == "status" then',
+        'elseif msg == "taintcheck" then',
+    )
+
+    assert "LFGListFrame" in visible_body
+    assert "ApplicationViewer" in visible_body
+    assert "viewer:IsShown()" in visible_body
+    assert "EntryName" in visible_body
+    assert "DescriptionFrame.Text" in visible_body
+    assert "IsSecretValue(text)" in visible_body
+    assert "fontString = viewer.EntryName" in visible_body
+    assert (
+        "fontString = viewer.DescriptionFrame and viewer.DescriptionFrame.Text"
+        in visible_body
+    )
+    assert "_GetVisibleApplicationViewerKeystoneLevel()" in helper_body
+    assert "visibleFrame.keyLevel" in status_body
+    assert "visibleFrame.viewerShown" in source
+    assert "ApplicantScout_VisibleApplicationViewerKeystoneDiagnostics" in status_body
+    assert "entryCreationCache.keyLevel" in status_body
+
+
+def test_listing_key_level_is_derived_before_owned_keystone_activity_fallback():
+    source = _lua_source()
+    payload_body = _slice_between(
+        source,
+        "local function BuildPayload(entry, applicantIDs)",
+        "local function HashSnapshot(payload)",
+    )
+
+    key_idx = payload_body.index("keyLevel = _GetListingKeystoneLevel(")
+    owned_idx = payload_body.index("if shouldUseOwnedKeystone then")
+
+    assert key_idx < owned_idx
+
+
 def test_payload_does_not_pack_raiderio_dungeon_rows_into_qr():
     source = _lua_source()
     payload_body = _slice_between(
