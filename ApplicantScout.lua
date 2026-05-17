@@ -2259,6 +2259,8 @@ lastQREncodeError = nil
 qrForceVisibleForShot = false
 qrForceVisibleShotGen = 0
 local SHOT_THROTTLE_S = 0.5
+local TRANSPORT_POLL_S = 2.0
+local lastTransportPollTime = 0
 
 local function _ReleaseForceVisibleShotLease(forceVisibleShotGen)
     if forceVisibleShotGen and qrForceVisibleShotGen == forceVisibleShotGen then
@@ -2607,13 +2609,23 @@ end)
 -- ChatMessagingLockdown. BuildPayload still has field-level guards for force
 -- paths and future callers, but scheduled snapshots should wait for clean data.
 C_Timer.NewTicker(0.25, function()
+    local now = GetTime()
     if not (scanDirty and ApplicantScoutDB and ApplicantScoutDB.enabled) then
         -- Drain pending throttled shot: data was changed during throttle
         -- window (pendingShotDirty=true), but no new events fired since.
         -- Without this drain: shot never goes out for sustained state.
-        if pendingShotDirty and (GetTime() - lastShotTime) >= SHOT_THROTTLE_S then
+        if pendingShotDirty and (now - lastShotTime) >= SHOT_THROTTLE_S then
             if not IsChatMessagingLockdown() then
                 MaybeTriggerScreenshot()
+            end
+        end
+        if ApplicantScoutDB and ApplicantScoutDB.enabled
+           and (now - lastTransportPollTime) >= TRANSPORT_POLL_S
+           and not IsChatMessagingLockdown() then
+            lastTransportPollTime = now
+            local entry = CheckSessionTransition()
+            if isSessionActive then
+                MaybeTriggerScreenshot(false, entry)
             end
         end
         return
@@ -2623,6 +2635,7 @@ C_Timer.NewTicker(0.25, function()
     if IsChatMessagingLockdown() then
         return  -- scanDirty stays true; processed once lockdown clears
     end
+    lastTransportPollTime = now
     scanDirty = false
     -- CheckSessionTransition starts/ends session as needed AND returns the
     -- live entry; pass it to MaybeTriggerScreenshot so we don't re-call
@@ -3050,6 +3063,12 @@ SlashCmdList.APSCOUT = function(msg)
         print("  session active: " .. tostring(isSessionActive))
         print("  session gen: " .. tostring(sessionGen))
         print("  scanDirty: " .. tostring(scanDirty))
+        print("  group members: "
+              .. tostring(math.floor(SafeNumber(GetNumGroupMembers and GetNumGroupMembers(), 0))))
+        print("  transport poll age: "
+              .. (lastTransportPollTime > 0
+                   and string.format("%.1fs", GetTime() - lastTransportPollTime)
+                   or "never"))
         print("  shot suppressed: " .. (suppressShotsUntil and suppressShotsUntil > 0
               and (GetTime() < suppressShotsUntil
                    and string.format("yes (%.2fs left)", suppressShotsUntil - GetTime())

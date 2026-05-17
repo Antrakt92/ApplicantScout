@@ -101,6 +101,25 @@ def test_party_roster_starts_transport_without_lfg_listing():
     assert "not isSessionActive and not force" in screenshot_body
 
 
+def test_scan_ticker_polls_transport_state_when_events_are_missed():
+    source = _lua_source()
+    ticker_body = _slice_between(
+        source,
+        "C_Timer.NewTicker(0.25, function()",
+        "-- Settings panel:",
+    )
+
+    idle_idx = ticker_body.index("if not (scanDirty and ApplicantScoutDB and ApplicantScoutDB.enabled) then")
+    poll_idx = ticker_body.index("if ApplicantScoutDB and ApplicantScoutDB.enabled")
+    transition_idx = ticker_body.index("local entry = CheckSessionTransition()", poll_idx)
+    screenshot_idx = ticker_body.index("MaybeTriggerScreenshot(false, entry)", transition_idx)
+    dirty_idx = ticker_body.index("scanDirty = false")
+
+    assert idle_idx < poll_idx < transition_idx < screenshot_idx < dirty_idx
+    assert "TRANSPORT_POLL_S" in ticker_body
+    assert "not IsChatMessagingLockdown()" in ticker_body[poll_idx:dirty_idx]
+
+
 def test_roster_payload_rows_skip_solo_player_when_not_grouped():
     source = _lua_source()
     roster_body = _slice_between(
