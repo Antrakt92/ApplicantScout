@@ -288,6 +288,11 @@ def test_roster_spec_resolution_requests_inspect_when_spec_is_unknown():
 
 def test_inspect_ready_marks_roster_dirty_after_caching_spec():
     source = _lua_source()
+    header_body = _slice_between(
+        source,
+        "local SafeStr, APSPrint, InitDB, StartSession, EndSession, CheckSessionTransition,",
+        "-- Forward-decl mutable state used by StartSession/EndSession/reset.",
+    )
     inspect_body = _slice_between(
         source,
         "local function _OnRosterInspectReady(guid)",
@@ -301,6 +306,9 @@ def test_inspect_ready_marks_roster_dirty_after_caching_spec():
 
     assert "rosterInspectSpecByGUID[guid] = specID" in inspect_body
     assert 'MarkDirty("inspect")' in inspect_body
+    assert "MarkDirty" in header_body
+    assert "MarkDirty = function(reason)" in source
+    assert "local function MarkDirty(reason)" not in source
     assert 'INSPECT_READY                    = function(_, guid)' in events_body
     assert "_OnRosterInspectReady(guid)" in events_body
 

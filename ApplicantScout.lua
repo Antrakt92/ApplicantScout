@@ -138,7 +138,7 @@ local qrCurrentSize = 0                -- current frame side length in screen pi
 -- is defined further down. Without the forward-decl, Lua resolves the name as
 -- _G.MaybeTriggerScreenshot (= nil) and call fails with "attempt to call a nil value".
 local SafeStr, APSPrint, InitDB, StartSession, EndSession, CheckSessionTransition,
-      MaybeTriggerScreenshot,
+      MarkDirty, MaybeTriggerScreenshot,
       -- Settings panel (pinned above PVEFrame). Forward-decl'd so slash handler
       -- + PLAYER_LOGIN handler can reference before bodies are defined.
       _SetEnabled, _SetDebug, _SetAutoMPlusPlaystyle, _AttachSettingsPanel,
@@ -464,7 +464,7 @@ end
 -- scan cycle (avoids spam during applicant bursts where 30+ events fire <1s
 -- apart). All events funnel here; behavior decisions live in ScanAndEmit /
 -- CheckSessionTransition — DRY-locked.
-local function MarkDirty(reason)
+MarkDirty = function(reason)
     local wasClean = not scanDirty
     scanDirty = true
     if wasClean and ApplicantScoutDB and ApplicantScoutDB.debug then
