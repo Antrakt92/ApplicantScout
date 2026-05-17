@@ -2260,6 +2260,7 @@ qrForceVisibleForShot = false
 qrForceVisibleShotGen = 0
 local SHOT_THROTTLE_S = 0.5
 local TRANSPORT_POLL_S = 2.0
+local TRANSPORT_HEARTBEAT_S = 10.0
 local lastTransportPollTime = 0
 
 local function _ReleaseForceVisibleShotLease(forceVisibleShotGen)
@@ -2625,7 +2626,12 @@ C_Timer.NewTicker(0.25, function()
             lastTransportPollTime = now
             local entry = CheckSessionTransition()
             if isSessionActive then
-                MaybeTriggerScreenshot(false, entry)
+                if (now - lastShotTime) >= TRANSPORT_HEARTBEAT_S
+                   and not _qrSuppressedByInteraction then
+                    MaybeTriggerScreenshot(true, entry)
+                else
+                    MaybeTriggerScreenshot(false, entry)
+                end
             end
         end
         return

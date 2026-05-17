@@ -120,6 +120,22 @@ def test_scan_ticker_polls_transport_state_when_events_are_missed():
     assert "not IsChatMessagingLockdown()" in ticker_body[poll_idx:dirty_idx]
 
 
+def test_transport_poll_reemits_snapshot_heartbeat_for_late_companion_start():
+    source = _lua_source()
+    ticker_body = _slice_between(
+        source,
+        "C_Timer.NewTicker(0.25, function()",
+        "-- Settings panel:",
+    )
+
+    heartbeat_idx = ticker_body.index("TRANSPORT_HEARTBEAT_S")
+    force_idx = ticker_body.index("MaybeTriggerScreenshot(true, entry)", heartbeat_idx)
+    non_force_idx = ticker_body.index("MaybeTriggerScreenshot(false, entry)", heartbeat_idx)
+
+    assert heartbeat_idx < force_idx < non_force_idx
+    assert "not _qrSuppressedByInteraction" in ticker_body[heartbeat_idx:force_idx]
+
+
 def test_roster_payload_rows_skip_solo_player_when_not_grouped():
     source = _lua_source()
     roster_body = _slice_between(
