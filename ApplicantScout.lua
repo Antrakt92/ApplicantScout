@@ -155,7 +155,8 @@ local SafeStr, APSPrint, InitDB, StartSession, EndSession, CheckSessionTransitio
       _SetupPVEFrameMovement,
       -- Group Finder creation helpers. Kept separate from QR/session state:
       -- this defaults Blizzard's own entry-creation form only.
-      _SetupLFGDefaultPlaystyle, _MaybeAutoSelectDefaultPlaystyle
+      _SetupLFGEntryCreationKeyCapture, _SetupLFGDefaultPlaystyle,
+      _MaybeAutoSelectDefaultPlaystyle
 -- Forward-decl mutable state used by StartSession/EndSession/reset. WHY: those
 -- functions assign via bare `x = ...`; without forward-decl, the `local` keyword
 -- on declarations later in this file would shadow them and the bare assignments
@@ -189,8 +190,20 @@ local lfgDefaultPlaystyleHooksSetup = false
 local lfgDefaultPlaystyleApplying = false
 local lfgDefaultPlaystyleHookError = nil
 local lfgDefaultPlaystyleTouchedPanels = setmetatable({}, { __mode = "k" })
+local lfgEntryCreationKeyCaptureState = {
+    hooksSetup = false,
+    hookError = nil,
+}
 local lfgEntryCreationKeyCaptureHooked = setmetatable({}, { __mode = "k" })
-local entryCreationKeyLevelCache = nil
+local entryCreationKeyState = {
+    entryCreationKeyLevelCache = nil,
+    pendingEntryCreationKeyLevelCache = nil,
+    activeListingCacheContext = nil,
+    activeListingGeneration = 0,
+    activeListingMaybeChanged = false,
+    entryCreationKeyLevelCacheDecision = "none",
+    pendingTtl = 10,
+}
 local ENTRY_CREATION_KEY_CACHE_TTL = 3600
 
 -- ───────────────────────────────────────────────────────────
@@ -404,7 +417,7 @@ EndSession = function()
     -- early-returned (qrFrame missing, QR encode failure) the flag could persist
     -- across sessions and trigger empty drains in the scan ticker. Clear here.
     pendingShotDirty = false
-    entryCreationKeyLevelCache = nil
+    entryCreationKeyState.entryCreationKeyLevelCache = nil
 
     -- Schedule deferred Hide AFTER the final clear-shot has had a chance to
     -- fire. The screenshot path inside MaybeTriggerScreenshot is
@@ -444,6 +457,8 @@ CheckSessionTransition = function()
     end
     local hosting = entry ~= nil
     local hasRoster = _HasGroupRosterForTransport()
+    local listingContext = entryCreationKeyState.EntryListingCacheContext(entry)
+    entryCreationKeyState.ReconcileEntryCreationKeyCache(listingContext)
     local transportActive = hosting or hasRoster
 
     if transportActive and not isSessionActive then
@@ -1225,37 +1240,194 @@ local function _ReadCleanWidgetText(widget)
     return SafeStr(text, "")
 end
 
+entryCreationKeyState.EntryListingCacheContext = function(entry)
+    entry = SafeTable(entry)
+    if not entry then return nil end
+    local activityIDs = SafeTable(entry.activityIDs)
+    local activityID = math.floor(SafeNumber(activityIDs and activityIDs[1], 0))
+    if activityID <= 0 then
+        activityID = math.floor(SafeNumber(entry.activityID, 0))
+    end
+    if activityID < 0 then activityID = 0 end
+    local questID = math.floor(SafeNumber(entry.questID, 0))
+    if questID < 0 then questID = 0 end
+    return { activityID = activityID, questID = questID }
+end
+
+local function _EntryCreationCacheFresh(cache)
+    cache = SafeTable(cache)
+    if not cache then return false end
+    if GetTime and (GetTime() - SafeNumber(cache.at, 0)) > ENTRY_CREATION_KEY_CACHE_TTL then
+        return false
+    end
+    return true
+end
+
+local function _EntryCreationCacheMatchesListing(cache, listingContext)
+    if not _EntryCreationCacheFresh(cache) then return false end
+    listingContext = SafeTable(listingContext)
+    if not listingContext then return false end
+
+    local activityID = math.floor(SafeNumber(listingContext.activityID, 0))
+    if activityID <= 0 then return false end
+
+    local cacheActivityID = math.floor(SafeNumber(cache.activityID, 0))
+    if cacheActivityID <= 0 or cacheActivityID ~= activityID then
+        return false
+    end
+
+    local questID = math.floor(SafeNumber(listingContext.questID, 0))
+    local cacheQuestID = math.floor(SafeNumber(cache.questID, 0))
+    if cacheQuestID > 0 and questID > 0 and cacheQuestID ~= questID then
+        return false
+    end
+    return true
+end
+
+local function _SameEntryListingCacheContext(a, b)
+    a = SafeTable(a)
+    b = SafeTable(b)
+    if not a or not b then return false end
+    return math.floor(SafeNumber(a.activityID, 0)) == math.floor(SafeNumber(b.activityID, 0))
+       and math.floor(SafeNumber(a.questID, 0)) == math.floor(SafeNumber(b.questID, 0))
+end
+
+local function _ClearEntryCreationKeyLevelCache(reason)
+    entryCreationKeyState.entryCreationKeyLevelCache = nil
+    entryCreationKeyState.pendingEntryCreationKeyLevelCache = nil
+    entryCreationKeyState.entryCreationKeyLevelCacheDecision = reason or "cleared"
+end
+
+local function _PublishPendingEntryCreationKeyLevelCache(listingContext)
+    if GetTime
+       and entryCreationKeyState.pendingEntryCreationKeyLevelCache
+       and (GetTime() - SafeNumber(entryCreationKeyState.pendingEntryCreationKeyLevelCache.at, 0))
+           > entryCreationKeyState.pendingTtl then
+        entryCreationKeyState.pendingEntryCreationKeyLevelCache = nil
+        entryCreationKeyState.entryCreationKeyLevelCacheDecision = "ignored: pending submit expired"
+        return false
+    end
+    if not _EntryCreationCacheMatchesListing(entryCreationKeyState.pendingEntryCreationKeyLevelCache, listingContext) then
+        entryCreationKeyState.pendingEntryCreationKeyLevelCache = nil
+        return false
+    end
+    entryCreationKeyState.entryCreationKeyLevelCache = entryCreationKeyState.pendingEntryCreationKeyLevelCache
+    entryCreationKeyState.pendingEntryCreationKeyLevelCache = nil
+    entryCreationKeyState.entryCreationKeyLevelCacheDecision = "promoted pending submit"
+    return true
+end
+
 local function _GetCachedEntryCreationKeystoneLevel(activityID, questID)
-    local cache = entryCreationKeyLevelCache
+    activityID = math.floor(SafeNumber(activityID, 0))
+    if activityID <= 0 then
+        entryCreationKeyState.entryCreationKeyLevelCacheDecision = "ignored: active activity unknown"
+        return 0
+    end
+    local cache = entryCreationKeyState.entryCreationKeyLevelCache
     if not cache then return 0 end
-    if GetTime and (GetTime() - cache.at) > ENTRY_CREATION_KEY_CACHE_TTL then
-        entryCreationKeyLevelCache = nil
+    if not _EntryCreationCacheFresh(cache) then
+        entryCreationKeyState.entryCreationKeyLevelCache = nil
+        entryCreationKeyState.entryCreationKeyLevelCacheDecision = "ignored: expired"
         return 0
     end
 
-    activityID = math.floor(SafeNumber(activityID, 0))
     questID = math.floor(SafeNumber(questID, 0))
-    if cache.activityID > 0 and activityID > 0 and cache.activityID ~= activityID then
+    if cache.activityID <= 0 or cache.activityID ~= activityID then
+        entryCreationKeyState.entryCreationKeyLevelCacheDecision = "ignored: activity mismatch"
         return 0
     end
     if cache.questID > 0 and questID > 0 and cache.questID ~= questID then
+        entryCreationKeyState.entryCreationKeyLevelCacheDecision = "ignored: quest mismatch"
         return 0
     end
+    entryCreationKeyState.entryCreationKeyLevelCacheDecision = "used"
     return _NormalizeKeystoneLevel(cache.keyLevel)
 end
 
 local function _ClearEntryCreationKeystoneLevelCache(activityID, questID)
-    local cache = entryCreationKeyLevelCache
-    if not cache then return end
     activityID = math.floor(SafeNumber(activityID, 0))
     questID = math.floor(SafeNumber(questID, 0))
-    if cache.activityID > 0 and activityID > 0 and cache.activityID ~= activityID then
+    local listingContext = { activityID = activityID, questID = questID }
+    if _EntryCreationCacheMatchesListing(entryCreationKeyState.pendingEntryCreationKeyLevelCache, listingContext) then
+        entryCreationKeyState.pendingEntryCreationKeyLevelCache = nil
+    end
+    if _EntryCreationCacheMatchesListing(entryCreationKeyState.entryCreationKeyLevelCache, listingContext) then
+        entryCreationKeyState.entryCreationKeyLevelCache = nil
+        entryCreationKeyState.entryCreationKeyLevelCacheDecision = "cleared: form key unreadable"
+    end
+end
+
+entryCreationKeyState.PrintDiagnostics = function()
+    print("  entry key capture hooks: " .. tostring(lfgEntryCreationKeyCaptureState.hooksSetup)
+          .. (lfgEntryCreationKeyCaptureState.hookError
+              and (" (error: " .. lfgEntryCreationKeyCaptureState.hookError .. ")")
+              or ""))
+    local pendingCache = SafeTable(entryCreationKeyState.pendingEntryCreationKeyLevelCache)
+    local publishedCache = SafeTable(entryCreationKeyState.entryCreationKeyLevelCache)
+    print("  pendingEntryCreationCache.keyLevel: "
+          .. tostring(pendingCache and pendingCache.keyLevel or 0))
+    print("  pendingEntryCreationCache.activityID: "
+          .. tostring(pendingCache and pendingCache.activityID or 0))
+    print("  pendingEntryCreationCache.questID: "
+          .. tostring(pendingCache and pendingCache.questID or 0))
+    print("  publishedEntryCreationCache.keyLevel: "
+          .. tostring(publishedCache and publishedCache.keyLevel or 0))
+    print("  publishedEntryCreationCache.activityID: "
+          .. tostring(publishedCache and publishedCache.activityID or 0))
+    print("  publishedEntryCreationCache.questID: "
+          .. tostring(publishedCache and publishedCache.questID or 0))
+    print("  activeListingCache.generation: "
+          .. tostring(entryCreationKeyState.activeListingGeneration))
+    print("  activeListingCache.activityID: "
+          .. tostring(entryCreationKeyState.activeListingCacheContext
+                     and entryCreationKeyState.activeListingCacheContext.activityID or 0))
+    print("  activeListingCache.questID: "
+          .. tostring(entryCreationKeyState.activeListingCacheContext
+                     and entryCreationKeyState.activeListingCacheContext.questID or 0))
+    print("  listing cache decision: "
+          .. tostring(entryCreationKeyState.entryCreationKeyLevelCacheDecision))
+end
+
+entryCreationKeyState.ReconcileEntryCreationKeyCache = function(listingContext)
+    listingContext = SafeTable(listingContext)
+    if not listingContext then
+        if entryCreationKeyState.activeListingCacheContext then
+            entryCreationKeyState.activeListingGeneration = entryCreationKeyState.activeListingGeneration + 1
+            _ClearEntryCreationKeyLevelCache("listing-ended")
+        else
+            entryCreationKeyState.entryCreationKeyLevelCache = nil
+            entryCreationKeyState.entryCreationKeyLevelCacheDecision = "idle"
+        end
+        entryCreationKeyState.activeListingCacheContext = nil
+        entryCreationKeyState.activeListingMaybeChanged = false
         return
     end
-    if cache.questID > 0 and questID > 0 and cache.questID ~= questID then
+
+    if math.floor(SafeNumber(listingContext.activityID, 0)) <= 0 then
+        entryCreationKeyState.activeListingCacheContext = listingContext
+        entryCreationKeyState.activeListingGeneration = entryCreationKeyState.activeListingGeneration + 1
+        entryCreationKeyState.activeListingMaybeChanged = false
+        _ClearEntryCreationKeyLevelCache("ignored: active activity unknown")
         return
     end
-    entryCreationKeyLevelCache = nil
+
+    local listingChanged = entryCreationKeyState.activeListingMaybeChanged
+       or not _SameEntryListingCacheContext(entryCreationKeyState.activeListingCacheContext, listingContext)
+    if listingChanged then
+        entryCreationKeyState.activeListingGeneration = entryCreationKeyState.activeListingGeneration + 1
+        entryCreationKeyState.activeListingCacheContext = listingContext
+        if not _PublishPendingEntryCreationKeyLevelCache(listingContext) then
+            _ClearEntryCreationKeyLevelCache("stale-after-entry-update")
+        end
+        entryCreationKeyState.activeListingMaybeChanged = false
+        return
+    end
+
+    entryCreationKeyState.activeListingCacheContext = listingContext
+    if entryCreationKeyState.pendingEntryCreationKeyLevelCache then
+        _PublishPendingEntryCreationKeyLevelCache(listingContext)
+    end
+    entryCreationKeyState.activeListingMaybeChanged = false
 end
 
 local function _RememberEntryCreationKeystoneLevel(panel, reason)
@@ -1293,7 +1465,7 @@ local function _RememberEntryCreationKeystoneLevel(panel, reason)
         return false
     end
 
-    entryCreationKeyLevelCache = {
+    entryCreationKeyState.pendingEntryCreationKeyLevelCache = {
         activityID = activityID,
         questID = questID,
         keyLevel = keyLevel,
@@ -2590,6 +2762,51 @@ _MaybeAutoSelectDefaultPlaystyle = function(panel, reason)
     return true
 end
 
+_SetupLFGEntryCreationKeyCapture = function()
+    if lfgEntryCreationKeyCaptureState.hooksSetup or lfgEntryCreationKeyCaptureState.hookError then
+        return lfgEntryCreationKeyCaptureState.hooksSetup
+    end
+
+    local hook = _G.hooksecurefunc
+    local selectFn = _G.LFGListEntryCreation_Select
+    local showFn = _G.LFGListEntryCreation_Show
+    local setEditModeFn = _G.LFGListEntryCreation_SetEditMode
+    if type(hook) ~= "function"
+       or type(selectFn) ~= "function"
+       or type(showFn) ~= "function"
+       or type(setEditModeFn) ~= "function" then
+        return false
+    end
+
+    local ok, err = pcall(function()
+        hook("LFGListEntryCreation_Select", function(panel)
+            _HookEntryCreationKeyCapture(panel)
+        end)
+        hook("LFGListEntryCreation_Show", function(panel)
+            _HookEntryCreationKeyCapture(panel)
+        end)
+        hook("LFGListEntryCreation_SetEditMode", function(panel)
+            _HookEntryCreationKeyCapture(panel)
+        end)
+    end)
+
+    if not ok then
+        lfgEntryCreationKeyCaptureState.hookError = tostring(err)
+        if ApplicantScoutDB and ApplicantScoutDB.debug then
+            print("|cff999999[APS-debug]|r LFG key capture hook failed: "
+                  .. lfgEntryCreationKeyCaptureState.hookError)
+        end
+        return false
+    end
+
+    lfgEntryCreationKeyCaptureState.hooksSetup = true
+    local frame = _G.LFGListFrame
+    if frame and frame.EntryCreation then
+        _HookEntryCreationKeyCapture(frame.EntryCreation)
+    end
+    return true
+end
+
 _SetupLFGDefaultPlaystyle = function()
     if lfgDefaultPlaystyleHooksSetup or lfgDefaultPlaystyleHookError then
         return lfgDefaultPlaystyleHooksSetup
@@ -2610,16 +2827,13 @@ _SetupLFGDefaultPlaystyle = function()
 
     local ok, err = pcall(function()
         hook("LFGListEntryCreation_Select", function(panel)
-            _HookEntryCreationKeyCapture(panel)
             _MaybeAutoSelectDefaultPlaystyle(panel, "select")
         end)
         hook("LFGListEntryCreation_Show", function(panel)
-            _HookEntryCreationKeyCapture(panel)
             if panel then lfgDefaultPlaystyleTouchedPanels[panel] = nil end
             _MaybeAutoSelectDefaultPlaystyle(panel, "show")
         end)
         hook("LFGListEntryCreation_SetEditMode", function(panel, editMode)
-            _HookEntryCreationKeyCapture(panel)
             if not editMode then
                 _MaybeAutoSelectDefaultPlaystyle(panel, "create-mode")
             end
@@ -2643,7 +2857,6 @@ _SetupLFGDefaultPlaystyle = function()
     lfgDefaultPlaystyleHooksSetup = true
     local frame = _G.LFGListFrame
     if frame and frame.EntryCreation then
-        _HookEntryCreationKeyCapture(frame.EntryCreation)
         _MaybeAutoSelectDefaultPlaystyle(frame.EntryCreation, "setup")
     end
     return true
@@ -2655,6 +2868,7 @@ local EVENT_HANDLERS = {
         MarkDirty("login")
         _AttachSettingsPanel()
         _SetupPVEFrameMovement()  -- no-ops if BlizzMove loaded OR PVEFrame missing
+        _SetupLFGEntryCreationKeyCapture() -- no-ops until Blizzard LFG globals exist
         _SetupLFGDefaultPlaystyle() -- no-ops until Blizzard LFG globals exist
         _TryHookInfoPanels()      -- initial scan; ADDON_LOADED catches LoD frames later
     end,
@@ -2673,6 +2887,7 @@ local EVENT_HANDLERS = {
     -- each as its addon loads. Cost: ~10-15 fires per session × 12-frame
     -- iteration = microseconds.
     ADDON_LOADED                     = function()
+        _SetupLFGEntryCreationKeyCapture()
         _SetupLFGDefaultPlaystyle()
         _TryHookInfoPanels()
     end,
@@ -2687,7 +2902,10 @@ local EVENT_HANDLERS = {
     end,
     LFG_LIST_APPLICANT_LIST_UPDATED  = function() MarkDirty("listupd") end,
     LFG_LIST_APPLICANT_UPDATED       = function() MarkDirty("appupd") end,
-    LFG_LIST_ACTIVE_ENTRY_UPDATE     = function() MarkDirty("entryupd") end,
+    LFG_LIST_ACTIVE_ENTRY_UPDATE     = function()
+        entryCreationKeyState.activeListingMaybeChanged = true
+        MarkDirty("entryupd")
+    end,
     PARTY_LEADER_CHANGED             = function() MarkDirty("ldrchg") end,
     GROUP_ROSTER_UPDATE              = function() MarkDirty("roster") end,
     GROUP_LEFT                       = function() MarkDirty("groupleft") end,
@@ -2889,6 +3107,7 @@ _SetAutoMPlusPlaystyle = function(token, quiet)
     ApplicantScoutDB.autoMPlusPlaystyle = token
     _SyncAutoMPlusPlaystyleDropdown()
     if token ~= AUTO_MPLUS_PLAYSTYLE_DISABLED then
+        _SetupLFGEntryCreationKeyCapture()
         _SetupLFGDefaultPlaystyle()
         local frame = _G.LFGListFrame
         if frame and frame.EntryCreation then
@@ -3328,6 +3547,7 @@ SlashCmdList.APSCOUT = function(msg)
         print("  BlizzMove loaded: " .. tostring(hasBlizzMove))
         print("  movement setup: " .. tostring(PVEFrame
               and PVEFrame.apsMovementSetup or false))
+        entryCreationKeyState.PrintDiagnostics()
         print("  default playstyle hooks: " .. tostring(lfgDefaultPlaystyleHooksSetup)
               .. (lfgDefaultPlaystyleHookError
                   and (" (error: " .. lfgDefaultPlaystyleHookError .. ")")

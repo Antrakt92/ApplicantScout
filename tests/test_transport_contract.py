@@ -101,6 +101,56 @@ def test_party_roster_starts_transport_without_lfg_listing():
     assert "not isSessionActive and not force" in screenshot_body
 
 
+def test_entry_creation_cache_clears_when_grouped_listing_ends_without_ending_transport():
+    source = _lua_source()
+    transition_body = _slice_between(
+        source,
+        "CheckSessionTransition = function()",
+        "-- Single transition logger",
+    )
+
+    reconcile_idx = transition_body.index("entryCreationKeyState.ReconcileEntryCreationKeyCache(listingContext)")
+    transport_idx = transition_body.index("local transportActive = hosting or hasRoster")
+    end_idx = transition_body.index("EndSession()")
+
+    assert "local listingContext = entryCreationKeyState.EntryListingCacheContext(entry)" in transition_body
+    assert reconcile_idx < transport_idx < end_idx
+    assert "_ClearEntryCreationKeyLevelCache(\"listing-ended\")" in source
+
+
+def test_same_activity_entry_update_requires_fresh_pending_key_cache():
+    source = _lua_source()
+    helper_body = _slice_between(
+        source,
+        "entryCreationKeyState.ReconcileEntryCreationKeyCache = function(listingContext)",
+        "local function _RememberEntryCreationKeystoneLevel(panel, reason)",
+    )
+
+    maybe_idx = helper_body.index("local listingChanged = entryCreationKeyState.activeListingMaybeChanged")
+    pending_idx = helper_body.index(
+        "_PublishPendingEntryCreationKeyLevelCache(listingContext)",
+        maybe_idx,
+    )
+    stale_idx = helper_body.index("_ClearEntryCreationKeyLevelCache(\"stale-after-entry-update\")")
+
+    assert maybe_idx < pending_idx < stale_idx
+    assert "_PublishPendingEntryCreationKeyLevelCache(listingContext)" in helper_body
+
+
+def test_pending_entry_creation_cache_has_short_promotion_window():
+    source = _lua_source()
+    helper_body = _slice_between(
+        source,
+        "local function _PublishPendingEntryCreationKeyLevelCache(listingContext)",
+        "local function _GetCachedEntryCreationKeystoneLevel(activityID, questID)",
+    )
+
+    assert "pendingTtl = 10" in source
+    assert "entryCreationKeyState.pendingEntryCreationKeyLevelCache.at" in helper_body
+    assert "entryCreationKeyState.pendingTtl" in helper_body
+    assert "entryCreationKeyState.pendingEntryCreationKeyLevelCache = nil" in helper_body
+
+
 def test_scan_ticker_polls_transport_state_when_events_are_missed():
     source = _lua_source()
     ticker_body = _slice_between(
@@ -381,6 +431,22 @@ def test_listing_key_level_prefers_visible_posted_level_over_activity_text():
     assert name_idx < comment_idx < visible_idx < cached_idx < short_idx < full_idx
 
 
+def test_cached_entry_creation_key_requires_known_active_activity():
+    source = _lua_source()
+    helper_body = _slice_between(
+        source,
+        "local function _GetCachedEntryCreationKeystoneLevel(activityID, questID)",
+        "local function _ClearEntryCreationKeystoneLevelCache",
+    )
+
+    normalize_idx = helper_body.index("activityID = math.floor(SafeNumber(activityID, 0))")
+    unknown_idx = helper_body.index("if activityID <= 0 then")
+    cache_idx = helper_body.index("local cache = entryCreationKeyState.entryCreationKeyLevelCache")
+
+    assert normalize_idx < unknown_idx < cache_idx
+    assert "return 0" in helper_body[unknown_idx:cache_idx]
+
+
 def test_listing_key_level_uses_active_creation_form_cache():
     source = _lua_source()
     payload_body = _slice_between(
@@ -398,7 +464,7 @@ def test_listing_key_level_uses_active_creation_form_cache():
     )
 
     assert "entryCreationKeyLevelCache" in source
-    assert "_HookEntryCreationKeyCapture(frame.EntryCreation" in source
+    assert "_SetupLFGEntryCreationKeyCapture = function()" in source
     assert ':HookScript("OnClick", function()' in creation_body
     assert "panel.Name" in creation_body
     assert "panel.Description" in creation_body
@@ -421,8 +487,48 @@ def test_entry_creation_cache_clears_when_posted_key_cannot_be_read():
     assert "if keyLevel == 0 then" in creation_body
     assert "_ClearEntryCreationKeystoneLevelCache(activityID, questID)" in creation_body
     assert creation_body.index("_ClearEntryCreationKeystoneLevelCache(activityID, questID)") < (
-        creation_body.index("entryCreationKeyLevelCache = {")
+        creation_body.index("pendingEntryCreationKeyLevelCache = {")
     )
+
+
+def test_lfg_key_capture_setup_is_independent_from_default_playstyle_internal():
+    source = _lua_source()
+    key_capture_body = _slice_between(
+        source,
+        "_SetupLFGEntryCreationKeyCapture = function()",
+        "_SetupLFGDefaultPlaystyle = function()",
+    )
+    playstyle_body = _slice_between(
+        source,
+        "_SetupLFGDefaultPlaystyle = function()",
+        "local EVENT_HANDLERS = {",
+    )
+
+    assert "LFGListEntryCreation_OnPlayStyleSelectedInternal" not in key_capture_body
+    assert "_HookEntryCreationKeyCapture(panel)" in key_capture_body
+    assert "LFGListEntryCreation_OnPlayStyleSelectedInternal" in playstyle_body
+    assert "_HookEntryCreationKeyCapture" not in playstyle_body
+
+
+def test_status_reports_key_capture_hooks_and_cache_decision_separately():
+    source = _lua_source()
+    status_body = _slice_between(
+        source,
+        'elseif msg == "status" then',
+        'elseif msg == "taintcheck" then',
+    )
+    diagnostics_body = _slice_between(
+        source,
+        "entryCreationKeyState.PrintDiagnostics = function()",
+        "entryCreationKeyState.ReconcileEntryCreationKeyCache = function(listingContext)",
+    )
+
+    assert "entryCreationKeyState.PrintDiagnostics()" in status_body
+    assert "entry key capture hooks:" in diagnostics_body
+    assert "default playstyle hooks:" in status_body
+    assert "pendingEntryCreationCache.keyLevel" in diagnostics_body
+    assert "publishedEntryCreationCache.keyLevel" in diagnostics_body
+    assert "listing cache decision:" in diagnostics_body
 
 
 def test_listing_key_level_accepts_short_visible_key_titles_only():
