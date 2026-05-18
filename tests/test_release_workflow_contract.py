@@ -74,9 +74,11 @@ def test_pkgmeta_excludes_tests_and_dev_only_release_inputs_from_marketplace_zip
         "PLAN.md",
         "NOTES.md",
         "TODO.md",
+        "CLAUDE.md",
     ):
         assert re.search(rf"(?m)^\s*-\s+{re.escape(ignored)}\s*$", pkgmeta)
     assert re.search(r'(?m)^\s*-\s+"?\*\.private\.md"?\s*$', pkgmeta)
+    assert re.search(r'(?m)^\s*-\s+"?\*\.private/"?\s*$', pkgmeta)
 
 
 def test_package_script_dirty_inputs_include_release_shaping_metadata():
@@ -120,3 +122,26 @@ def test_toc_loads_qr_library_before_addon_runtime():
     toc = _read_repo_text("ApplicantScout.toc")
 
     assert toc.index("libs\\qrencode.lua") < toc.index("ApplicantScout.lua")
+
+
+def test_package_script_rejects_private_directories_and_legacy_claude_docs():
+    package_script = _read_repo_text("scripts/package-addon.ps1")
+
+    assert "(^|/)[^/]+\\.private(/|$)" in package_script
+    assert "(^|/)CLAUDE\\.md$" in package_script
+
+
+def test_readme_documents_current_wire_version_and_transient_qr_visibility():
+    readme = _read_repo_text("README.md")
+
+    assert "Wire payload: compact v6" in readme
+    assert "Wire payload: compact v5" not in readme
+    assert "stays visible during an\nactive capture session" not in readme
+    assert "screenshot capture window" in readme
+
+
+def test_runtime_comments_do_not_claim_qr_visible_for_full_session():
+    source = _read_repo_text("ApplicantScout.lua")
+
+    assert "always-visible during active session" not in source
+    assert "short visibility lease" in source

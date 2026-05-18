@@ -18,4 +18,6 @@ ignore:
   - PLAN.md
   - NOTES.md
   - TODO.md
+  - CLAUDE.md
   - "*.private.md"
+  - "*.private/"

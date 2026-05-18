@@ -2580,8 +2580,8 @@ end
 -- entryHint: optional pre-fetched C_LFGList.GetActiveEntryInfo() result from
 -- the scan-tick caller — avoids a second API call per scan. nil falls back
 -- to fetching here (force-shot from EndSession / /apscout shotnow).
--- Frame is always-visible during active session, so no Show/Hide cycle around
--- Screenshot — eliminates the prior render-pipeline race at non-integer DPI.
+-- QR paints for a short visibility lease, then Screenshot runs after the render
+-- settle window; manual debug/move modes can keep the frame visible outside it.
 MaybeTriggerScreenshot = function(force, entryHint)
     -- "Can't fire" early-returns clear pendingShotDirty so the scan-ticker drain
     -- (line further below) doesn't spin endlessly calling us back when conditions

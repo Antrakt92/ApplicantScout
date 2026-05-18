@@ -64,9 +64,10 @@ Scout Companion for the overlay.
 
 ## Using ApplicantScout
 
-The QR frame defaults to the top-left of the UI and stays visible during an
-active capture session so screenshot transport is reliable. Use `/apscout
-qrmove` and Alt-drag the QR frame to move it.
+The QR frame defaults to the top-left of the UI and appears only during the
+screenshot capture window so it stays out of the way between snapshots. Use
+`/apscout qrvisible` for debugging, or `/apscout qrmove` and Alt-drag the QR
+frame to move it.
 
 ApplicantScout temporarily raises screenshot quality and uses JPG format while
 enabled, then restores your prior screenshot settings when you turn it off with
@@ -108,9 +109,10 @@ Windows user profile.
 - WoW Retail Midnight: Interface `120005, 120007`
 - Latest ApplicantScout addon release
 - Latest Applicant Scout Companion release
-- Wire payload: compact v5, including optional RaiderIO main-score and
-  target-relative completion data. The companion enriches highest timed
-  key-per-dungeon context from the installed local RaiderIO database.
+- Wire payload: compact v6, including optional RaiderIO main-score,
+  target-relative completion data, and party/raid roster snapshots. The
+  companion enriches highest timed key-per-dungeon context from the installed
+  local RaiderIO database.
 - Classic-era clients are not supported
 
 ## Troubleshooting

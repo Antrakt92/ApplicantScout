@@ -71,7 +71,9 @@ function Assert-ZipContract {
             $Entry -match "(^|/)PLAN\.md$" -or
             $Entry -match "(^|/)NOTES\.md$" -or
             $Entry -match "(^|/)TODO\.md$" -or
+            $Entry -match "(^|/)CLAUDE\.md$" -or
             $Entry -match "(^|/)[^/]+\.private\.md$" -or
+            $Entry -match "(^|/)[^/]+\.private(/|$)" -or
             $Entry -match "(^|/)SavedVariables(/|$)" -or
             $Entry -match "^$AddonName/docs/"
         ) {
