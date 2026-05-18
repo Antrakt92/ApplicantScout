@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.3.0 - 18-May-2026 - Companion 0.4.0 Party roster overlay
+
+This paired addon + companion release adds live party/raid roster snapshots so
+the companion can show the current group in a dedicated Party tab, even when no
+new applicants are pending. It also keeps QR transport hidden between captures
+and reduces repeated idle screenshots once a full group is already stable.
+
+### Added
+
+- Added v6 roster snapshots for the current party or raid, allowing the paired
+  companion to show the full current group in its Party tab.
+- Party-only snapshots now publish when the player is grouped without an active
+  applicant listing, so the overlay can still inspect the assembled group.
+- Roster snapshots now include enough current-player and inspected-party context
+  for the companion to fetch Warcraft Logs / RaiderIO data for group members.
+
+### Improved
+
+- QR transport now shows only for the screenshot capture window and hides again
+  immediately afterward, avoiding a permanent large QR frame while a party is
+  assembled.
+- The addon now polls meaningful party roster state changes and inspect-ready
+  updates instead of depending only on join/leave events.
+- Hosted key recovery now falls back through the owned keystone when Blizzard's
+  active listing data is generic or protected.
+- Roster snapshots dirty themselves after inspected party specs become ready,
+  so the companion can update role/spec context without waiting for another
+  applicant event.
+
+### Fixed
+
+- Fixed current-party snapshots not being emitted when the group existed but no
+  applicant list was active.
+- Fixed idle full-party sessions repeatedly showing QR and taking screenshots
+  even though nobody joined, left, or changed inspect state.
+- Fixed party roster snapshots missing spec context until inspect data became
+  available.
+- Fixed hosted-key detection falling back to an unknown or wrong level when the
+  listing UI could not expose the key directly.
+
+### Notes
+
+- This addon release is paired with ApplicantScout Companion `0.4.0`.
+- The paired companion uses the new Party tab and manual key control for current
+  group review.
+
 ## 0.2.2 - 17-May-2026 - Companion 0.3.2 screenshot decode speedup
 
 This paired addon release keeps the public addon release train aligned with
