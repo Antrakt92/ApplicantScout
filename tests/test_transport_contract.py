@@ -361,6 +361,29 @@ def test_roster_payload_rows_include_key_summary_and_group_metadata():
     assert "emittedCount = emittedCount + 1" in roster_body
 
 
+def test_roster_payload_rows_pack_current_score_separately_from_main_score():
+    source = _lua_source()
+    summary_body = _slice_between(
+        source,
+        "local function _GetRaiderIOMPlusSummary(memberName, listingActivityID, targetKey)",
+        "local function BuildRosterPayloadRows(listingActivityIDForRio, listingKeyLevelForRio)",
+    )
+    roster_body = _slice_between(
+        source,
+        "local function BuildRosterPayloadRows(listingActivityIDForRio, listingKeyLevelForRio)",
+        "-- CRC32 IEEE-802.3",
+    )
+
+    current_idx = roster_body.index("_Uint16BE(rioSummary.currentScore)")
+    main_idx = roster_body.index("_Uint16BE(rioSummary.mainScore)")
+    assert current_idx < main_idx
+    assert roster_body.count("_Uint16BE(rioSummary.mainScore)") == 1
+    assert "keystoneProfile.mplusCurrent" in summary_body
+    assert "keystoneProfile.currentScore" in summary_body
+    assert "keystoneProfile.mplusMainCurrent" in summary_body
+    assert "keystoneProfile.mainCurrentScore" in summary_body
+
+
 def test_roster_spec_resolution_requests_inspect_when_spec_is_unknown():
     source = _lua_source()
     spec_body = _slice_between(

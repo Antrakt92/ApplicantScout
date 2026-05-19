@@ -1670,8 +1670,9 @@ local function _RaiderIODungeonMatchesActivity(dungeon, listingActivityID)
     return math.floor(SafeNumber(dungeon.keystone_instance, 0)) == listingActivityID
 end
 
-local function _EmptyRaiderIOMPlusSummary(mainScore)
+local function _EmptyRaiderIOMPlusSummary(currentScore, mainScore)
     return {
+        currentScore = _ClampUInt16(currentScore),
         mainScore = _ClampUInt16(mainScore),
         hasProfile = false,
         bestKey = 0,
@@ -1702,30 +1703,35 @@ local function _GetRaiderIOMPlusSummary(memberName, listingActivityID, targetKey
     -- the raw LFG name can be secret-tagged, and RaiderIO's public API performs
     -- string parsing internally.
     if memberName == "" or memberName == "?" then
-        return _EmptyRaiderIOMPlusSummary(0)
+        return _EmptyRaiderIOMPlusSummary(0, 0)
     end
     local rio = SafeTable(_G.RaiderIO)
     if not rio or type(rio.GetProfile) ~= "function" then
-        return _EmptyRaiderIOMPlusSummary(0)
+        return _EmptyRaiderIOMPlusSummary(0, 0)
     end
 
     local ok, profile = pcall(rio.GetProfile, memberName)
-    if not ok then return _EmptyRaiderIOMPlusSummary(0) end
+    if not ok then return _EmptyRaiderIOMPlusSummary(0, 0) end
     profile = SafeTable(profile)
-    if not profile then return _EmptyRaiderIOMPlusSummary(0) end
+    if not profile then return _EmptyRaiderIOMPlusSummary(0, 0) end
 
     local keystoneProfile = SafeTable(profile.mythicKeystoneProfile)
-    if not keystoneProfile then return _EmptyRaiderIOMPlusSummary(0) end
+    if not keystoneProfile then return _EmptyRaiderIOMPlusSummary(0, 0) end
     if IsSecretValue(keystoneProfile.blocked) or keystoneProfile.blocked then
-        return _EmptyRaiderIOMPlusSummary(0)
+        return _EmptyRaiderIOMPlusSummary(0, 0)
     end
 
+    local current = SafeTable(keystoneProfile.mplusCurrent)
+    local currentScore = keystoneProfile.currentScore
+    if current then
+        currentScore = current.score
+    end
     local mainCurrent = SafeTable(keystoneProfile.mplusMainCurrent)
     local mainScore = keystoneProfile.mainCurrentScore
     if mainCurrent then
         mainScore = mainCurrent.score
     end
-    local summary = _EmptyRaiderIOMPlusSummary(mainScore)
+    local summary = _EmptyRaiderIOMPlusSummary(currentScore, mainScore)
 
     local sortedDungeons = SafeTable(keystoneProfile.sortedDungeons)
     if not sortedDungeons then return summary end
@@ -2063,7 +2069,7 @@ local function BuildRosterPayloadRows(listingActivityIDForRio, listingKeyLevelFo
         table.insert(rosterOut, string.char(_ClampUInt8(row.classID)))
         table.insert(rosterOut, _Uint16BE(row.specID))
         table.insert(rosterOut, _Uint16BE(row.ilvl))
-        table.insert(rosterOut, _Uint16BE(rioSummary.mainScore))
+        table.insert(rosterOut, _Uint16BE(rioSummary.currentScore))
         table.insert(rosterOut, _Uint16BE(rioSummary.mainScore))
         table.insert(rosterOut, string.char(rioSummary.hasProfile and 1 or 0))
         table.insert(rosterOut, string.char(rioSummary.bestKey))
