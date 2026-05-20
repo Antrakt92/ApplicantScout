@@ -2336,10 +2336,10 @@ local function HashSnapshot(payload)
 end
 
 -- Resolve QR encoder reference (set by libs/qrencode.lua via addon namespace).
--- WoW's addon loader unconditionally passes (addonName, ns) varargs to every
--- Lua file in an addon, so the namespace is always populated.
+-- Nil-safe so BuildQRMatrix can show its missing-library diagnostic instead of
+-- crashing at file load if the embedded QR library failed to populate ns.QR.
 local _, _addonNS = ...
-local _qrencode = _addonNS.QR.qrcode
+local _qrencode = _addonNS.QR and _addonNS.QR.qrcode
 
 -- Acquire (or reuse from pool) a black-rectangle texture and position+size it.
 -- Returns the texture or nil if pool exhausted (caller logs warning).

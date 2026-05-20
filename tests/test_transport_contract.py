@@ -81,6 +81,17 @@ def test_qr_shot_lease_shows_hidden_qr_and_releases_after_capture():
     assert "qrForceVisibleForShot = false" in source
 
 
+def test_qr_library_resolution_is_nil_safe_before_missing_lib_diagnostic():
+    source = _lua_source()
+    qr_init_idx = source.index("local _qrencode =")
+    build_idx = source.index("local function BuildQRMatrix(payload)")
+    init_line = source[qr_init_idx : source.index("\n", qr_init_idx)]
+
+    assert qr_init_idx < build_idx
+    assert "_addonNS.QR and _addonNS.QR.qrcode" in init_line
+    assert "_addonNS and" not in init_line
+
+
 def test_party_roster_starts_transport_without_lfg_listing():
     source = _lua_source()
     transition_body = _slice_between(
